@@ -29,7 +29,7 @@
         --radius-lg: 24px;
         --radius-full: 999px;
 
-        --gutter-x: 32px;
+        --gutter-x: clamp(12px, 4vw, 32px);
         --gutter-y: 12px;
 
         --control-h: 36px;
@@ -155,8 +155,24 @@
           background 0.2s;
         height: auto;
       }
+
       .btn--icon:hover {
         opacity: 1;
+      }
+
+      .btn--iconOnly {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        justify-content: center;
+        gap: 0;
+      }
+
+      .btn--iconOnly > i {
+        font-size: 16px;
+        line-height: 1;
+        width: 1.25em;
+        text-align: center;
       }
 
       .btn--circle {
@@ -172,18 +188,6 @@
         padding: 8px 12px;
         border-radius: var(--radius-sm);
       }
-
-      /* .floatingAction {
-        position: fixed;
-        top: 12px;
-        right: 12px;
-        z-index: 9999;
-        opacity: 0.85;
-      }
-
-      .floatingAction:hover {
-        opacity: 1;
-      } */
 
       /* =========================
          Select Component
@@ -454,7 +458,7 @@
 
           <button
             id="reconnectBtn"
-            class="btn"
+            class="btn btn--iconOnly"
             data-action="reconnect-session"
             disabled
             aria-label="再接続"
@@ -465,7 +469,7 @@
 
           <button
             id="forceSilenceBtn"
-            class="btn"
+            class="btn btn--iconOnly"
             data-action="force-silence"
             disabled
             aria-label="文節挿入"
@@ -486,7 +490,7 @@
         </div>
         <button
           id="clearAllBtn"
-          class="btn"
+          class="btn btn--iconOnly"
           data-action="clear-all"
           aria-label="全て消去"
           title="全て消去"
@@ -616,7 +620,7 @@
               data-action="send-memo"
               aria-label="追加"
             >
-              ⬆
+              <i class="fa-solid fa-arrow-up" aria-hidden="true"></i>
             </button>
           </div>
 
@@ -631,7 +635,6 @@
         </div>
       </div>
 
-      <!-- 議事録 -->
       <div id="report" class="section">
         <h3 class="panelTitle">
           <i
@@ -680,7 +683,6 @@
       </div>
 
       <div id="downloadAudio"></div>
-      <!-- 追加：設定モーダル -->
       <div
         id="settingsModal"
         class="modal is-hidden"
