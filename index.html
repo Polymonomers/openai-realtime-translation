@@ -1,0 +1,1982 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Realtime Translation Demo</title>
+
+    <!-- レスポンシブ対応 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- Font Awesome（アイコン） -->
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+    />
+
+    <style>
+      /* =========================
+        Theme / Tokens
+      ========================= */
+      :root {
+        --color-primary: #0078d4;
+        --color-primary-hover: #0078d4;
+        --color-border: #e5e7eb;
+        --color-bg: #ffffff;
+        --color-bg-subtle: #f9fafb;
+
+        --radius-sm: 8px;
+        --radius-md: 12px;
+        --radius-lg: 24px;
+        --radius-full: 999px;
+
+        --gutter-x: 32px;
+        --gutter-y: 12px;
+
+        --control-h: 36px;
+        --control-font: 0.85em;
+      }
+
+      /* =========================
+         Base
+      ========================= */
+      body {
+        font-family:
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          Roboto,
+          "Hiragino Kaku Gothic ProN",
+          "Noto Sans JP",
+          "Yu Gothic",
+          sans-serif;
+        margin: 0;
+        background: #fafafa;
+      }
+
+      .page {
+        width: 100%;
+        box-sizing: border-box;
+        padding: var(--gutter-y) var(--gutter-x);
+      }
+
+      .section {
+        width: 100%;
+        box-sizing: border-box;
+      }
+
+      .panelTitle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .panelTitle__actions {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .panelTitle__icon {
+        opacity: 0.8;
+      }
+
+      #conversationWrapper {
+        display: flex;
+        gap: 12px;
+      }
+
+      .column {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+
+      /* =========================
+         Link
+      ========================= */
+      .textLink {
+        color: var(--color-primary);
+        text-decoration: underline;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      .textLink:hover {
+        color: var(--color-primary-hover);
+      }
+      .textLink i {
+        margin-right: 6px;
+        opacity: 0.85;
+      }
+
+      .is-hidden {
+        display: none !important;
+      }
+
+      /* =========================
+         Button Component
+      ========================= */
+      .btn {
+        border: 1px solid var(--color-border);
+        background: var(--color-bg);
+        color: #111;
+        padding: 6px 12px;
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        font-size: var(--control-font);
+        line-height: 1;
+        height: var(--control-h);
+        box-sizing: border-box;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+      }
+      .btn:hover {
+        background: var(--color-bg-subtle);
+      }
+
+      .btn--primary {
+        border: none;
+        background: var(--color-primary);
+        color: #fff;
+      }
+      .btn--primary:hover {
+        background: var(--color-primary-hover);
+      }
+
+      .btn--icon {
+        padding: 4px 8px;
+        border-radius: var(--radius-sm);
+        opacity: 0.6;
+        transition:
+          opacity 0.2s,
+          background 0.2s;
+        height: auto;
+      }
+      .btn--icon:hover {
+        opacity: 1;
+      }
+
+      .btn--circle {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        border-radius: 50%;
+        font-size: 16px;
+        flex: 0 0 36px;
+      }
+
+      .sub-btn {
+        padding: 8px 12px;
+        border-radius: var(--radius-sm);
+      }
+
+      /* .floatingAction {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        z-index: 9999;
+        opacity: 0.85;
+      }
+
+      .floatingAction:hover {
+        opacity: 1;
+      } */
+
+      /* =========================
+         Select Component
+      ========================= */
+      .select {
+        appearance: none;
+        height: var(--control-h);
+        box-sizing: border-box;
+        padding: 0 26px 0 10px;
+        font-size: var(--control-font);
+        line-height: 1.4;
+        color: #111;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background-color: var(--color-bg);
+        cursor: pointer;
+      }
+      .select:hover {
+        background-color: var(--color-bg-subtle);
+      }
+      .select:focus {
+        outline: none;
+        border-color: var(--color-primary);
+        box-shadow: 0 0 0 1px var(--color-primary);
+      }
+      .select:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      /* =========================
+         Controls
+      ========================= */
+      #controls {
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      #sessionToggleBtn {
+        min-width: 160px;
+        font-size: 16px;
+        font-weight: 500;
+      }
+
+      #sessionToggleBtn.recording {
+        background: var(--color-primary);
+        color: #fff;
+        border-color: var(--color-primary);
+      }
+
+      /* =========================
+         chatBox Component
+      ========================= */
+      .chatBox {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--color-border);
+        padding: 12px;
+        height: 240px;
+        overflow-y: auto;
+        background: var(--color-bg);
+        border-radius: var(--radius-md);
+      }
+
+      .chatBox__copy {
+        position: sticky;
+        top: 8px;
+        align-self: flex-end;
+        z-index: 10;
+        font-size: 14px;
+      }
+
+      .chatBox__message {
+        margin: 6px 0;
+        padding: 8px;
+        border-radius: var(--radius-sm);
+        white-space: pre-wrap;
+      }
+
+      .chatBox__message--user,
+      .chatBox__message--translate,
+      .chatBox__message--ai {
+        background: #e8f0ff;
+      }
+
+      .chatBox__message--memo {
+        background: #fef6d1;
+      }
+
+      .chatBox--report {
+        height: 180px;
+      }
+
+      /* =========================
+         report Component
+      ========================= */
+      .reportOutput {
+        margin: 0;
+        background: transparent;
+        font-family: inherit;
+        white-space: pre-wrap;
+      }
+
+      .reportActions {
+        margin-top: 8px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+
+      /* =========================
+         inputGroup Component
+      ========================= */
+      #textInputWrapper {
+        display: flex;
+        align-items: center;
+        margin-bottom: 12px;
+        gap: 12px;
+      }
+
+      .inputGroup {
+        display: flex;
+        align-items: flex-end;
+        gap: 6px;
+        width: 100%;
+        max-width: 720px;
+        padding: 6px 8px;
+        background: var(--color-bg);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+      }
+
+      .inputGroup__field {
+        flex: 1;
+        min-width: 0;
+        resize: none;
+        border: none;
+        outline: none;
+        font-size: 14px;
+        line-height: 1.6;
+        padding: 8px 12px;
+        min-height: 40px;
+        max-height: 160px;
+        overflow-y: hidden;
+        box-sizing: border-box;
+        border-radius: var(--radius-lg);
+        font-family: inherit;
+      }
+
+      /* =========================
+        Modal
+      ========================= */
+      .modal {
+        position: fixed;
+        inset: 0;
+        z-index: 10000;
+        display: grid;
+        place-items: center;
+      }
+
+      .modal__backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.35);
+      }
+
+      .modal__panel {
+        position: relative;
+        width: min(560px, calc(100vw - 24px));
+        background: var(--color-bg);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
+        padding: 14px;
+      }
+
+      .modal__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--color-border);
+      }
+
+      .modal__title {
+        margin: 0;
+        font-size: 16px;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .modal__body {
+        padding: 12px 0;
+      }
+
+      .modal__label {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 8px;
+        color: #111;
+      }
+
+      .modal__input {
+        width: 100%;
+        height: 40px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        padding: 0 12px;
+        box-sizing: border-box;
+        outline: none;
+      }
+      .modal__input:focus {
+        border-color: var(--color-primary);
+        box-shadow: 0 0 0 1px var(--color-primary);
+      }
+
+      .modal__hint {
+        margin-top: 8px;
+        font-size: 12px;
+        opacity: 0.75;
+      }
+
+      .modal__footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--color-border);
+      }
+
+      /* =========================
+         レスポンシブ対応
+      ========================= */
+      @media (max-width: 768px) {
+        #conversationWrapper {
+          flex-direction: column;
+        }
+
+        #transcriptContainer,
+        #translationContainer,
+        #aiContainer {
+          height: 160px;
+        }
+
+        .chatBox--report {
+          height: 160px;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="page">
+      <div class="panelTitle">
+        <div id="controls" class="section">
+          <button
+            id="sessionToggleBtn"
+            class="btn"
+            data-action="toggle-session"
+          >
+            セッション開始
+          </button>
+
+          <button
+            id="reconnectBtn"
+            class="btn"
+            data-action="reconnect-session"
+            disabled
+            aria-label="再接続"
+            title="再接続"
+          >
+            <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i>
+          </button>
+
+          <button
+            id="forceSilenceBtn"
+            class="btn"
+            data-action="force-silence"
+            disabled
+            aria-label="文節挿入"
+            title="文節挿入"
+          >
+            <i class="fa-solid fa-scissors" aria-hidden="true"></i>
+          </button>
+
+          <a
+            id="downloadLink"
+            href="#"
+            download="session_audio.webm"
+            class="textLink is-hidden"
+          >
+            <i class="fa-solid fa-download" aria-hidden="true"></i>
+            音声をダウンロード
+          </a>
+        </div>
+        <button
+          id="clearAllBtn"
+          class="btn"
+          data-action="clear-all"
+          aria-label="全て消去"
+          title="全て消去"
+        >
+          <i class="fa-solid fa-eraser" aria-hidden="true"></i>
+        </button>
+        <button
+          id="settingsBtn"
+          class="btn btn--primary btn--circle"
+          data-action="open-settings"
+          aria-label="設定"
+          title="設定"
+        >
+          <i class="fa-solid fa-gear" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div id="conversationWrapper" class="section">
+        <div class="column">
+          <h3 class="panelTitle">
+            <i
+              class="fa-solid fa-microphone-lines panelTitle__icon"
+              aria-hidden="true"
+            ></i>
+            文字起こし
+            <span class="panelTitle__actions">
+              <select
+                id="transcriptLang"
+                class="select"
+                data-lang-select="source"
+              ></select>
+            </span>
+          </h3>
+
+          <div id="transcriptContainer" class="chatBox">
+            <button
+              class="btn btn--icon chatBox__copy"
+              data-action="copy"
+              data-target="transcriptContainer"
+              aria-label="文字起こしをコピー"
+              title="コピー"
+            >
+              <i class="fa-regular fa-copy" aria-hidden="true"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="column">
+          <h3 class="panelTitle">
+            <i
+              class="fa-solid fa-language panelTitle__icon"
+              aria-hidden="true"
+            ></i>
+            翻訳
+            <span class="panelTitle__actions">
+              <select
+                id="translateLang"
+                class="select"
+                data-lang-select="target"
+              ></select>
+            </span>
+          </h3>
+
+          <div id="translationContainer" class="chatBox">
+            <button
+              class="btn btn--icon chatBox__copy"
+              data-action="copy"
+              data-target="translationContainer"
+              aria-label="翻訳をコピー"
+              title="コピー"
+            >
+              <i class="fa-regular fa-copy" aria-hidden="true"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="column">
+          <h3 class="panelTitle">
+            <i
+              class="fa-solid fa-robot panelTitle__icon"
+              aria-hidden="true"
+            ></i>
+            AI回答
+            <span class="panelTitle__actions">
+              <select
+                id="aiLang"
+                class="select"
+                data-lang-select="output"
+              ></select>
+            </span>
+          </h3>
+
+          <div id="aiContainer" class="chatBox">
+            <button
+              class="btn btn--icon chatBox__copy"
+              data-action="copy"
+              data-target="aiContainer"
+              aria-label="AI回答をコピー"
+              title="コピー"
+            >
+              <i class="fa-regular fa-copy" aria-hidden="true"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div id="memo" class="section">
+        <h3 class="panelTitle">
+          <i
+            class="fa-solid fa-pen-to-square panelTitle__icon"
+            aria-hidden="true"
+          ></i>
+          メモ
+        </h3>
+
+        <div id="textInputWrapper">
+          <div class="inputGroup">
+            <textarea
+              id="textInput"
+              class="inputGroup__field"
+              placeholder="メモを入力"
+              rows="1"
+            ></textarea>
+
+            <button
+              id="sendBtn"
+              class="btn btn--primary btn--circle"
+              data-action="send-memo"
+              aria-label="追加"
+            >
+              ⬆
+            </button>
+          </div>
+
+          <button
+            id="getMemosBtn"
+            class="btn sub-btn"
+            data-action="copy-memos"
+            title="メモ一覧取得"
+          >
+            <i class="fa-regular fa-copy" aria-hidden="true"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- 議事録 -->
+      <div id="report" class="section">
+        <h3 class="panelTitle">
+          <i
+            class="fa-regular fa-file-lines panelTitle__icon"
+            aria-hidden="true"
+          ></i>
+          議事録
+          <span class="panelTitle__actions">
+            <button
+              id="generateReportBtn"
+              class="btn"
+              data-action="generate-report"
+              aria-label="議事録生成"
+              title="議事録生成"
+            >
+              <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i>
+              生成
+            </button>
+          </span>
+        </h3>
+
+        <div id="reportBox" class="chatBox chatBox--report">
+          <button
+            class="btn btn--icon chatBox__copy"
+            data-action="copy-report"
+            aria-label="議事録をコピー"
+            title="コピー"
+          >
+            <i class="fa-regular fa-copy" aria-hidden="true"></i>
+          </button>
+
+          <pre id="reportOutput" class="chatBox__message reportOutput"></pre>
+        </div>
+
+        <div class="reportActions">
+          <a
+            id="reportDownloadLink"
+            href="#"
+            download="report.txt"
+            class="textLink is-hidden"
+          >
+            <i class="fa-solid fa-download" aria-hidden="true"></i>
+            テキストをダウンロード
+          </a>
+        </div>
+      </div>
+
+      <div id="downloadAudio"></div>
+      <!-- 追加：設定モーダル -->
+      <div
+        id="settingsModal"
+        class="modal is-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settingsTitle"
+      >
+        <div class="modal__backdrop" data-action="close-settings"></div>
+
+        <div class="modal__panel">
+          <div class="modal__header">
+            <h3 id="settingsTitle" class="modal__title">
+              <i class="fa-solid fa-gear" aria-hidden="true"></i>
+              設定
+            </h3>
+            <button
+              class="btn btn--icon"
+              data-action="close-settings"
+              aria-label="閉じる"
+              title="閉じる"
+            >
+              <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="modal__body">
+            <label class="modal__label" for="apiKeyInput">OpenAI APIキー</label>
+            <input
+              id="apiKeyInput"
+              class="modal__input"
+              type="password"
+              placeholder="sk-..."
+              autocomplete="off"
+            />
+            <div class="modal__hint">
+              ブラウザのローカルストレージに保存します。
+            </div>
+          </div>
+
+          <div class="modal__footer">
+            <button class="btn" data-action="delete-api-key">
+              <i class="fa-solid fa-trash" aria-hidden="true"></i>
+              削除
+            </button>
+            <button class="btn btn--primary" data-action="save-api-key">
+              <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i>
+              保存
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      /* =========================
+         Config / State
+      ========================= */
+      /**
+       * アプリの設定値
+       */
+      const CONFIG = {
+        WEBRTC_URL: "https://api.openai.com/v1/realtime?model=gpt-realtime",
+        TRANSCRIBE_MODEL: "gpt-4o-transcribe",
+        REPORT_MODEL: "gpt-4.1-mini",
+        TRANSLATE_MODEL: "gpt-4.1-nano",
+        MAX_SESSION_MS: 6 * 60 * 60 * 1000, // 6時間
+      };
+
+      /**
+       * セッション状態（WebRTC/Recorderなどの実体）をまとめて保持する。
+       */
+      const state = {
+        pc: null,
+        dc: null,
+        micStream: null,
+        mediaRecorder: null,
+        recordedChunks: [],
+        sessionRunning: false,
+        realtimeConnected: false,
+        reconnecting: false,
+        sessionStartedAt: 0,
+        sessionLimitTimerId: null,
+      };
+
+      /* =========================
+         Language (single source of truth)
+      ========================= */
+      /**
+       * 言語定義（日本語名/英語名）を一元管理する
+       * ここに追加すれば、セレクト生成・プロンプト生成の両方に反映される
+       */
+      const LANG_DEFS = {
+        auto: { ja: "自動", en: "the original language (auto-detect)" },
+        none: { ja: "なし", en: "none" },
+        ja: { ja: "日本語", en: "Japanese" },
+        en: { ja: "英語", en: "English" },
+        zh: { ja: "中国語", en: "Chinese" },
+        ko: { ja: "韓国語", en: "Korean" },
+        fr: { ja: "フランス語", en: "French" },
+        es: { ja: "スペイン語", en: "Spanish" },
+        de: { ja: "ドイツ語", en: "German" },
+        it: { ja: "イタリア語", en: "Italian" },
+        pt: { ja: "ポルトガル語", en: "Portuguese" },
+        ru: { ja: "ロシア語", en: "Russian" },
+        th: { ja: "タイ語", en: "Thai" },
+        vi: { ja: "ベトナム語", en: "Vietnamese" },
+        id: { ja: "インドネシア語", en: "Indonesian" },
+        hi: { ja: "ヒンディー語", en: "Hindi" },
+      };
+
+      /**
+       * 言語コードから、日本語名/英語名をまとめて返す
+       * @param {string} code
+       * @returns {{code:string, ja:string, en:string}}
+       */
+      function getLangInfo(code) {
+        const def = LANG_DEFS[code] || LANG_DEFS.ja;
+        return { code, ja: def.ja, en: def.en };
+      }
+
+      /**
+       * セレクトを言語定義から自動生成する
+       * @param {HTMLSelectElement} selectEl
+       * @param {string[]} codes
+       * @param {string} defaultValue
+       */
+      function buildLangSelect(selectEl, codes, defaultValue) {
+        selectEl.innerHTML = "";
+        for (const code of codes) {
+          const info = getLangInfo(code);
+          const opt = document.createElement("option");
+          opt.value = code;
+          opt.textContent = info.ja;
+          selectEl.appendChild(opt);
+        }
+        selectEl.value = defaultValue;
+      }
+
+      /**
+       * 3つの言語セレクトを初期化する（source/target/output）
+       */
+      function initLanguageSelects() {
+        const core = [
+          "ja",
+          "en",
+          "zh",
+          "ko",
+          "fr",
+          "es",
+          "de",
+          "it",
+          "pt",
+          "ru",
+          "th",
+          "vi",
+          "id",
+          "hi",
+        ];
+
+        buildLangSelect(
+          document.getElementById("transcriptLang"),
+          ["auto", ...core],
+          "auto",
+        );
+
+        buildLangSelect(
+          document.getElementById("translateLang"),
+          ["none", ...core],
+          "none",
+        );
+
+        buildLangSelect(document.getElementById("aiLang"), core, "ja");
+      }
+
+      /* =========================
+         DOM
+      ========================= */
+      /**
+       * DOM参照を集約
+       */
+      const el = {
+        // セッション・音声DL
+        sessionToggleBtn: document.getElementById("sessionToggleBtn"),
+        forceSilenceBtn: document.getElementById("forceSilenceBtn"),
+        reconnectBtn: document.getElementById("reconnectBtn"),
+        downloadLink: document.getElementById("downloadLink"),
+
+        // 言語セレクト
+        transcriptLangSelect: document.getElementById("transcriptLang"),
+        translateLangSelect: document.getElementById("translateLang"),
+        aiLangSelect: document.getElementById("aiLang"),
+
+        // 文字起こし・翻訳・AIコンテナ
+        transcriptContainer: document.getElementById("transcriptContainer"),
+        translationContainer: document.getElementById("translationContainer"),
+        aiContainer: document.getElementById("aiContainer"),
+
+        // メモ
+        textInput: document.getElementById("textInput"),
+        getMemosBtn: document.getElementById("getMemosBtn"),
+
+        // 議事録
+        reportBox: document.getElementById("reportBox"),
+        reportOutput: document.getElementById("reportOutput"),
+        reportDownloadLink: document.getElementById("reportDownloadLink"),
+        generateReportBtn: document.getElementById("generateReportBtn"),
+
+        // 設定
+        settingsModal: document.getElementById("settingsModal"),
+        apiKeyInput: document.getElementById("apiKeyInput"),
+      };
+
+      /* =========================
+         Stores (item_id => <p>)
+      ========================= */
+      /**
+       * Realtimeのitem_id等と表示DOMの対応を保持
+       * - userSpeech: 音声の文字起こし
+       * - translation: 翻訳結果
+       * - ai: AI出力（completeで追記）
+       */
+      const store = {
+        userSpeech: new Map(),
+        translation: new Map(),
+        ai: new Map(),
+      };
+
+      /* =========================
+         Utilities
+      ========================= */
+      /**
+       * 対象コンテナを最下部までスクロールする
+       * @param {HTMLElement} container
+       */
+      function scrollToBottom(container) {
+        container.scrollTop = container.scrollHeight;
+      }
+
+      /**
+       * ボタン表示を一時的に差し替え、一定時間後に元に戻す
+       * @param {HTMLElement} button
+       * @param {string} nextHTML
+       * @param {number} ms
+       */
+      function setTempButtonLabel(button, nextHTML, ms = 1000) {
+        const original = button.innerHTML;
+        button.innerHTML = nextHTML;
+        setTimeout(() => (button.innerHTML = original), ms);
+      }
+
+      /**
+       * textareaの高さを内容に合わせて自動調整
+       * @param {HTMLTextAreaElement} textarea
+       */
+      function autoResizeTextarea(textarea) {
+        textarea.style.height = "auto";
+        textarea.style.height = textarea.scrollHeight + "px";
+      }
+
+      /**
+       * chatBox内のメッセージ要素（<p>）を生成する
+       * @param {"user"|"google"|"ai"|"memo"} variant
+       * @param {string} initialText
+       * @returns {HTMLParagraphElement}
+       */
+      function createMessageParagraph(variant, initialText = "") {
+        const p = document.createElement("p");
+        p.className = `chatBox__message chatBox__message--${variant}`;
+        p.textContent = initialText;
+        return p;
+      }
+
+      /**
+       * パラグラフテキストを取得
+       * @param {any} container
+       * @returns innerText
+       */
+      function getParagraphsText(container) {
+        return Array.from(container.querySelectorAll("p"))
+          .map((p) => p.innerText)
+          .join("\n")
+          .trim();
+      }
+
+      /**
+       * 「コメント（=メモ）」かどうか判定
+       * - classで判定（推奨）
+       * - 念のためテキスト先頭でも判定
+       */
+      function isCommentParagraph(p) {
+        if (!p) return false;
+        return (
+          p.classList.contains("chatBox__message--memo") ||
+          (p.textContent || "").trim().startsWith("メモ：")
+        );
+      }
+
+      /**
+       * コンテナ内の<p>からテキスト抽出（コメント=メモを除外）
+       * @param {HTMLElement} container
+       * @returns {string}
+       */
+      function getParagraphsTextWithoutComments(container) {
+        return Array.from(container.querySelectorAll("p"))
+          .filter((p) => !isCommentParagraph(p))
+          .map((p) => p.innerText)
+          .join("\n")
+          .trim();
+      }
+
+      /**
+       * コメント一覧を作る（重複しないよう store.userSpeech の manual_ を採用）
+       * @returns {string}
+       */
+      function getCommentsListText() {
+        const comments = [];
+
+        store.userSpeech.forEach((p, id) => {
+          if (!id.startsWith("manual_")) return;
+          const t = (p.textContent || "").replace(/^メモ：\s*/g, "").trim();
+          if (t) comments.push(t);
+        });
+
+        return comments.join("\n").trim();
+      }
+
+      /**
+       * 強制ミュート
+       * @param {number} ms ミリ秒
+       */
+      function forceSilenceCut(ms = 900) {
+        if (!state.micStream) return;
+        const track = state.micStream.getAudioTracks()?.[0];
+        if (!track) return;
+
+        // 送出を一時的に止めて VAD に「無音」を作る
+        track.enabled = false;
+        setTimeout(() => {
+          track.enabled = true;
+        }, ms);
+      }
+
+      /**
+       * ボタンを一定時間だけ押せない状態にする（連打防止）
+       * @param {HTMLButtonElement} btn
+       * @param {number} ms
+       */
+      function temporarilyDisableButton(btn, ms = 800) {
+        if (!btn) return;
+        if (btn.disabled) return;
+
+        btn.disabled = true;
+        setTimeout(() => {
+          updateRealtimeButtons();
+        }, ms);
+      }
+
+      /**
+       * セッションタイマー開始
+       */
+      function startSessionLimitTimer() {
+        clearSessionLimitTimer();
+
+        state.sessionStartedAt = Date.now();
+        state.sessionLimitTimerId = setTimeout(() => {
+          if (!state.sessionRunning) return;
+
+          stopSession();
+
+          state.sessionRunning = false;
+          updateSessionToggleUI(false);
+          updateRealtimeButtons();
+
+          alert("セッションは最大6時間のため、自動的に停止しました。");
+        }, CONFIG.MAX_SESSION_MS);
+      }
+
+      /**
+       * セッションタイマー初期化
+       */
+      function clearSessionLimitTimer() {
+        if (state.sessionLimitTimerId) {
+          clearTimeout(state.sessionLimitTimerId);
+          state.sessionLimitTimerId = null;
+        }
+      }
+
+      /* =========================
+        API Key (localStorage)
+      ========================= */
+      const STORAGE_KEYS = {
+        OPENAI_API_KEY: "openai_api_key",
+      };
+
+      function loadApiKey() {
+        return (localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY) || "").trim();
+      }
+
+      function saveApiKey(key) {
+        localStorage.setItem(STORAGE_KEYS.OPENAI_API_KEY, key.trim());
+      }
+
+      function deleteApiKey() {
+        localStorage.removeItem(STORAGE_KEYS.OPENAI_API_KEY);
+      }
+
+      function hasApiKey() {
+        return !!loadApiKey();
+      }
+
+      function getApiKeyOrThrow() {
+        const k = loadApiKey();
+        if (!k)
+          throw new Error(
+            "APIキーが未設定です。右上の歯車から設定してください。",
+          );
+        return k;
+      }
+
+      function openSettings() {
+        el.apiKeyInput.value = loadApiKey(); // 既存を表示
+        el.settingsModal.classList.remove("is-hidden");
+        setTimeout(() => el.apiKeyInput?.focus(), 0);
+      }
+
+      function closeSettings() {
+        el.settingsModal.classList.add("is-hidden");
+      }
+
+      function updateApiKeyGateUI() {
+        // APIキーが無い場合「セッション開始」できない（停止はできるようにする）
+        const canStart = hasApiKey();
+        if (!state.sessionRunning) {
+          el.sessionToggleBtn.disabled = !canStart;
+          el.sessionToggleBtn.title = canStart
+            ? ""
+            : "APIキー未設定のため開始できません（歯車から設定）";
+        }
+      }
+
+      /* =========================
+         Clear all
+      ========================= */
+      /**
+       * 文字起こし・翻訳・AI回答の表示と内部Mapをまとめてクリアする。
+       */
+      function clearConversationPanels() {
+        const containers = [
+          { el: el.transcriptContainer, map: store.userSpeech },
+          { el: el.translationContainer, map: store.translation },
+          { el: el.aiContainer, map: store.ai },
+        ];
+
+        for (const c of containers) {
+          c.el.querySelectorAll("p").forEach((p) => p.remove());
+          c.map.clear();
+        }
+
+        // メモ入力欄も消す
+        el.textInput.value = "";
+        autoResizeTextarea(el.textInput);
+
+        // 議事録も消す（生成結果・DLリンク）
+        el.reportOutput.textContent = "";
+        el.reportDownloadLink.classList.add("is-hidden");
+        el.reportDownloadLink.href = "#";
+      }
+
+      /* =========================
+         Clipboard
+      ========================= */
+      /**
+       * 指定コンテナ内の<p>を結合してクリップボードにコピーする
+       * @param {string} containerId
+       * @param {HTMLElement} button
+       */
+      function copyContainerParagraphs(containerId, button) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+
+        const text = Array.from(container.querySelectorAll("p"))
+          .map((p) => p.innerText)
+          .join("\n");
+
+        navigator.clipboard
+          .writeText(text)
+          .then(() =>
+            setTempButtonLabel(
+              button,
+              '<i class="fa-solid fa-check" aria-hidden="true"></i>',
+              1000,
+            ),
+          )
+          .catch(console.error);
+      }
+
+      /**
+       * テキストをクリップボードにコピーする
+       * @param {string} containerId
+       * @param {HTMLElement} button
+       */
+      function copyTextToClipboard(text, button) {
+        navigator.clipboard
+          .writeText(text)
+          .then(() =>
+            setTempButtonLabel(
+              button,
+              '<i class="fa-solid fa-check" aria-hidden="true"></i>',
+              1000,
+            ),
+          )
+          .catch(console.error);
+      }
+
+      /**
+       * すべてのメモを結合してクリップボードにコピーする
+       */
+      function copyMemosOnlyToClipboard() {
+        const memos = [];
+        store.userSpeech.forEach((p, id) => {
+          if (id.startsWith("manual_")) {
+            memos.push(p.textContent.replace(/^メモ：\s*/g, ""));
+          }
+        });
+
+        navigator.clipboard
+          .writeText(memos.join("\n"))
+          .then(() =>
+            setTempButtonLabel(
+              el.getMemosBtn,
+              '<i class="fa-solid fa-check" aria-hidden="true"></i>',
+              1000,
+            ),
+          )
+          .catch(console.error);
+      }
+
+      /* =========================
+         Memo (manual insert)
+      ========================= */
+      /**
+       * 入力テキストを「メモ」として3カラム全てに同時挿入する
+       * @param {string} text
+       */
+      function insertMemoToAllContainers(text) {
+        const itemId = "manual_" + Date.now();
+        const memoText = `メモ：${text}`;
+
+        const targets = [
+          { container: el.transcriptContainer, map: store.userSpeech },
+          { container: el.translationContainer, map: store.translation },
+          { container: el.aiContainer, map: store.ai },
+        ];
+
+        for (const t of targets) {
+          const p = createMessageParagraph("memo", memoText);
+          t.container.appendChild(p);
+          t.map.set(itemId, p);
+          scrollToBottom(t.container);
+        }
+      }
+
+      /* =========================
+         Prompt
+      ========================= */
+      /**
+       * Realtimeセッション用のシステムプロンプト
+       * @returns {string}
+       */
+      function buildSystemPrompt() {
+        const out = getLangInfo(el.aiLangSelect.value).ja;
+        return `
+          #命令
+          ・あなたはリアルタイム通訳アシスタントです。以下の文章を正確かつ自然な ${out} に通訳してください。
+          #制約条件
+          ・出力は通訳文のみ（解説・前置き不要）
+          ・日常会話からビジネス文書まで適切な${out}表現を用いる
+          ・文脈やニュアンスを考慮し、直訳ではなく意図が伝わる自然な表現とする
+          ・専門用語や固有名詞は適宜${out}表記に変換
+          ・文章の形式や敬語のレベルは${out}圏の標準に合わせる
+        `;
+      }
+
+      /**
+       * Realtimeセッション用のシステムプロンプト
+       * @returns {string}
+       */
+      /**
+       * 翻訳用プロンプトを生成する（翻訳文のみ出す）。
+       * @param {object} params
+       * @param {string} params.text
+       * @param {string} params.sourceLang
+       * @param {string} params.targetLang
+       * @returns {string}
+       */
+      function buildTranslatePrompt({ text, sourceLang, targetLang }) {
+        const source = getLangInfo(sourceLang).en;
+        const target = getLangInfo(targetLang).en;
+
+        return [
+          "You are a translation engine.",
+          "Translate the given text faithfully.",
+          "Do not add explanations, notes, or extra text. Output translation only.",
+          `Source: ${source}`,
+          `Target: ${target}`,
+          "",
+          "TEXT:",
+          text,
+        ].join("\n");
+      }
+
+      function buildReportPrompt(transcript, summary) {
+        return `
+        #命令
+        ・以下は会議内容のAI要約と文字起こしデータです。
+        ・日本語の議事録にまとめて。
+        #制約条件
+        ・出力は議事録のみ（解説・前置き不要）。
+        ・AI要約の内容を優先すること。
+        ・ただし、情報が不足する場合は文字起こしを参照すること。
+        ・「メモ：」と記載された内容は確認済みの情報であり、最も信ぴょう性が高い。
+        ・事実だけに基づいて生成し、推論を含めないこと。
+        ・なるべくたくさんの詳細情報を含め、可能な限り詳しいレポートとすること。
+        #AI要約：${summary}
+        #文字起こし：${transcript}`;
+      }
+
+      /* =========================
+         Session Control
+      ========================= */
+      /**
+       * セッションを開始する
+       * - マイク取得
+       * - PeerConnection準備
+       * - Offer送信
+       */
+      async function startSession() {
+        const micStream = await setupMicrophone({ resetRecording: true });
+        await setupPeerConnection(micStream);
+        await createAndSendOffer();
+        state.realtimeConnected = true;
+        updateRealtimeButtons();
+      }
+
+      /**
+       * セッションを停止する
+       * - WebRTC接続を閉じる
+       * - 録音停止とダウンロードリンク生成を開始する
+       */
+      function stopSession() {
+        clearSessionLimitTimer();
+        closeRealtimeConnection();
+        stopRecordingAndPrepareDownloadLink();
+
+        // マイクを完全停止したい場合
+        state.micStream?.getTracks()?.forEach((t) => t.stop());
+        state.micStream = null;
+
+        state.realtimeConnected = false;
+        updateRealtimeButtons();
+      }
+
+      /**
+       * セッション再接続
+       */
+      async function reconnectSession() {
+        if (!state.sessionRunning) return;
+        if (state.reconnecting) return;
+
+        state.reconnecting = true;
+        updateRealtimeButtons();
+
+        try {
+          closeRealtimeConnection(); // WebRTCだけ閉じる（Recorder/マイクは維持）
+          await setupPeerConnection(state.micStream);
+          await createAndSendOffer();
+          state.realtimeConnected = true;
+        } catch (err) {
+          console.error("Reconnect failed:", err);
+          state.realtimeConnected = false;
+          // 必要ならUIに表示したければ、メモ欄等へ出す処理を追加
+        } finally {
+          state.reconnecting = false;
+          updateRealtimeButtons();
+        }
+      }
+
+      /**
+       * WebRTC関連（DataChannel/PeerConnection）を閉じる
+       */
+      function closeRealtimeConnection() {
+        state.dc?.close();
+        state.pc?.close();
+      }
+
+      /**
+       * 録音を停止し、停止後イベントでダウンロードリンクを更新・表示
+       */
+      function stopRecordingAndPrepareDownloadLink() {
+        if (!state.mediaRecorder || state.mediaRecorder.state === "inactive")
+          return;
+
+        state.mediaRecorder.stop();
+        state.mediaRecorder.onstop = () => {
+          const url = buildRecordedAudioObjectUrl();
+          if (!url) return;
+          showAudioDownloadLink(url);
+        };
+      }
+
+      /**
+       * recordedChunksからBlob URLを作成する
+       * @returns {string|null} 生成できない場合はnull
+       */
+      function buildRecordedAudioObjectUrl() {
+        if (state.recordedChunks.length === 0) return null;
+        const blob = new Blob(state.recordedChunks, { type: "audio/webm" });
+        state.recordedChunks = [];
+        return URL.createObjectURL(blob);
+      }
+
+      /**
+       * ダウンロードリンクにURLを設定
+       * @param {string} url
+       */
+      function showAudioDownloadLink(url) {
+        el.downloadLink.href = url;
+        el.downloadLink.classList.remove("is-hidden");
+      }
+
+      /**
+       * マイク入力を取得し、MediaRecorderを開始して録音データをstateに蓄積
+       * @returns {Promise<MediaStream>}
+       */
+      async function setupMicrophone(
+        { resetRecording } = { resetRecording: true },
+      ) {
+        if (!state.micStream) {
+          state.micStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+          });
+        }
+
+        // Recorder は「止まっている時だけ」開始（再接続では止めない）
+        if (!state.mediaRecorder || state.mediaRecorder.state === "inactive") {
+          if (resetRecording) state.recordedChunks = [];
+
+          state.mediaRecorder = new MediaRecorder(state.micStream);
+          state.mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) state.recordedChunks.push(e.data);
+          };
+          state.mediaRecorder.start();
+        }
+
+        return state.micStream;
+      }
+
+      /**
+       * PeerConnectionとDataChannelを作成し、受信イベントを登録
+       * @param {MediaStream} stream
+       */
+      async function setupPeerConnection(stream) {
+        state.pc = new RTCPeerConnection();
+        stream.getTracks().forEach((track) => state.pc.addTrack(track, stream));
+
+        //// 音声再生したい時は以下を追加
+        // const audioEl = document.createElement("audio");
+        // audioEl.autoplay = true;
+        // document.body.appendChild(audioEl);
+
+        state.dc = state.pc.createDataChannel("oai-events");
+
+        state.dc.onopen = () => {
+          state.dc.send(
+            JSON.stringify({
+              type: "session.update",
+              session: {
+                modalities: ["text"], // 音声を作らせない（=再生不要）
+                instructions: buildSystemPrompt(),
+                input_audio_transcription: { model: CONFIG.TRANSCRIBE_MODEL },
+              },
+            }),
+          );
+        };
+
+        state.dc.onmessage = (e) =>
+          handleDataChannelMessage(JSON.parse(e.data));
+
+        state.dc.onclose = () => {
+          state.realtimeConnected = false;
+          updateRealtimeButtons();
+        };
+
+        state.dc.onerror = () => {
+          state.realtimeConnected = false;
+          updateRealtimeButtons();
+        };
+
+        state.pc.onconnectionstatechange = () => {
+          const s = state.pc?.connectionState;
+          if (s === "failed" || s === "disconnected" || s === "closed") {
+            state.realtimeConnected = false;
+            updateRealtimeButtons();
+          }
+        };
+      }
+
+      /**
+       * Offerを作成してAPIに送信し、Answerを受け取って接続を確立
+       */
+      async function createAndSendOffer() {
+        const offer = await state.pc.createOffer();
+        await state.pc.setLocalDescription(offer);
+
+        const res = await fetch(CONFIG.WEBRTC_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${getApiKeyOrThrow()}`,
+            "Content-Type": "application/sdp",
+          },
+          body: offer.sdp,
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          state.realtimeConnected = false;
+          updateRealtimeButtons();
+          throw new Error(`Realtime offer error: ${res.status} ${errText}`);
+        }
+
+        await state.pc.setRemoteDescription({
+          type: "answer",
+          sdp: await res.text(),
+        });
+
+        state.realtimeConnected = true;
+        updateRealtimeButtons();
+      }
+
+      /* =========================
+         DataChannel Handling
+      ========================= */
+      /**
+       * Realtime APIのDataChannelメッセージを処理してUIに反映
+       * - 文字起こしのdelta追記
+       * - 文字起こし完了時に翻訳（任意）＆ response.create
+       * - AI出力のdelta追記
+       * @param {any} msg
+       */
+      function handleDataChannelMessage(msg) {
+        switch (msg.type) {
+          case "conversation.item.input_audio_transcription.delta": {
+            const itemId = msg.item_id;
+            let p = store.userSpeech.get(itemId);
+
+            if (!p) {
+              p = createMessageParagraph("user");
+              el.transcriptContainer.appendChild(p);
+              store.userSpeech.set(itemId, p);
+            }
+
+            p.textContent += msg.delta || "";
+            scrollToBottom(el.transcriptContainer);
+            return;
+          }
+
+          case "conversation.item.input_audio_transcription.completed": {
+            const itemId = msg.item_id;
+            const p = store.userSpeech.get(itemId);
+
+            if (p && el.translateLangSelect.value !== "none") {
+              translateText(itemId, p.textContent);
+            }
+
+            state.dc?.send(
+              JSON.stringify({
+                type: "response.create",
+                response: { modalities: ["text"] }, // テキストのみ
+              }),
+            );
+            return;
+          }
+
+          case "conversation.item.created": {
+            if (msg.item?.id) {
+              const p = createMessageParagraph("ai");
+              store.ai.set(msg.item.id, p);
+            }
+            return;
+          }
+
+          case "response.output_item.added": {
+            const id = msg.item?.id;
+            if (id) {
+              const p = createMessageParagraph("ai");
+              store.ai.set(id, p);
+            }
+            return;
+          }
+
+          case "response.text.delta":
+          case "response.output_text.delta": {
+            const p = store.ai.get(msg.item_id);
+            if (!p || !msg.delta) return;
+
+            if (!p.parentNode) el.aiContainer.appendChild(p);
+            p.textContent += msg.delta;
+            scrollToBottom(el.aiContainer);
+            return;
+          }
+
+          default:
+            return;
+        }
+      }
+
+      /* =========================
+         Translate
+      ========================= */
+      /**
+       * APIで翻訳し、翻訳欄を更新する
+       * @param {string} itemId
+       * @param {string} text
+       */
+      async function translateText(itemId, text) {
+        try {
+          const source =
+            el.transcriptLangSelect.value === "auto"
+              ? "auto"
+              : el.transcriptLangSelect.value;
+
+          const target = el.translateLangSelect.value;
+          if (target === "none") return;
+
+          const translated = await translateWithOpenAI({
+            text,
+            sourceLang: source,
+            targetLang: target,
+          });
+
+          if (!translated) return;
+
+          let p = store.translation.get(itemId);
+          if (!p) {
+            p = createMessageParagraph("translate");
+            el.translationContainer.appendChild(p);
+            store.translation.set(itemId, p);
+          }
+
+          p.textContent = translated;
+          scrollToBottom(el.translationContainer);
+        } catch (err) {
+          console.error(err);
+        }
+      }
+
+      /**
+       * OpenAI API 翻訳実行
+       * @param {string} text テキスト
+       * @param {string} sourceLang 元の言語
+       * @param {string} targetLang 翻訳先
+       */
+      async function translateWithOpenAI({ text, sourceLang, targetLang }) {
+        const prompt = buildTranslatePrompt({ text, sourceLang, targetLang });
+
+        const res = await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${getApiKeyOrThrow()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: CONFIG.TRANSLATE_MODEL,
+            input: prompt,
+            temperature: 0,
+          }),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          throw new Error(`OpenAI translate error: ${res.status} ${errText}`);
+        }
+
+        const data = await res.json();
+        if (typeof data.output_text === "string" && data.output_text.trim()) {
+          return data.output_text.trim();
+        }
+        const maybe =
+          data?.output?.[0]?.content
+            ?.map((c) => c?.text)
+            .filter(Boolean)
+            .join("") ||
+          data?.output?.[0]?.content?.[0]?.text ||
+          "";
+        return String(maybe || "").trim();
+      }
+
+      /* =========================
+         Report Generation
+      ========================= */
+      /**
+       * 文字起こしとAI応答から議事録生成
+       */
+      async function generateReport() {
+        if (el.generateReportBtn?.disabled) return;
+
+        const originalHTML = el.generateReportBtn.innerHTML;
+        el.generateReportBtn.disabled = true;
+        el.generateReportBtn.innerHTML =
+          '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> 生成中...';
+
+        el.generateReportBtn.disabled = true;
+        try {
+          const transcriptRaw = getParagraphsText(el.transcriptContainer);
+          const aiRaw = getParagraphsText(el.aiContainer);
+          const prompt = buildReportPrompt(transcriptRaw, aiRaw);
+
+          el.reportOutput.textContent = "生成中...";
+          el.reportDownloadLink.classList.add("is-hidden");
+          el.reportDownloadLink.href = "#";
+
+          const reportText = await generateTextWithOpenAI(prompt);
+          const main = reportText || "（生成結果が空でした）";
+
+          // 画面表示：AI生成の議事録のみ
+          el.reportOutput.textContent = main;
+
+          // ダウンロード用：コメント除外した各セクション + 最後にコメント一覧
+          const transcriptNoComments = getParagraphsTextWithoutComments(
+            el.transcriptContainer,
+          );
+          const translationNoComments = getParagraphsTextWithoutComments(
+            el.translationContainer,
+          );
+          const aiNoComments = getParagraphsTextWithoutComments(el.aiContainer);
+          const comments = getCommentsListText();
+
+          const sep = "\n\n" + "─".repeat(40) + "\n\n";
+
+          const downloadText =
+            "【AI生成 議事録】\n" +
+            (main || "（空）") +
+            sep +
+            "【文字起こし】\n" +
+            (transcriptNoComments || "（空）") +
+            sep +
+            "【翻訳結果】\n" +
+            (translationNoComments || "（空）") +
+            sep +
+            "【AI応答】\n" +
+            (aiNoComments || "（空）") +
+            sep +
+            "【コメント一覧】\n" +
+            (comments || "（なし）");
+
+          setReportDownloadLink("report.txt", downloadText);
+          el.reportBox.scrollTop = 0;
+        } catch (err) {
+          el.reportOutput.textContent =
+            "生成に失敗しました。\n" + (err?.message || String(err));
+        } finally {
+          el.generateReportBtn.disabled = false;
+          el.generateReportBtn.innerHTML = originalHTML;
+        }
+      }
+
+      /**
+       * OpenAI API 議事録生成
+       * @param {string} prompt
+       */
+      async function generateTextWithOpenAI(prompt) {
+        const res = await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${getApiKeyOrThrow()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: CONFIG.REPORT_MODEL || "gpt-4.1-mini",
+            input: prompt,
+          }),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          throw new Error(`OpenAI API error: ${res.status} ${errText}`);
+        }
+
+        const data = await res.json();
+        if (typeof data.output_text === "string" && data.output_text.trim()) {
+          return data.output_text.trim();
+        }
+
+        const maybe =
+          data?.output?.[0]?.content
+            ?.map((c) => c?.text)
+            .filter(Boolean)
+            .join("") ||
+          data?.output?.[0]?.content?.[0]?.text ||
+          "";
+
+        return String(maybe || "").trim();
+      }
+
+      /**
+       * 議事録ダウンロードリンク設定
+       * @param {string} filename
+       * @param {string} text
+       */
+      function setReportDownloadLink(filename, text) {
+        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+
+        el.reportDownloadLink.href = url;
+        el.reportDownloadLink.download = filename;
+        el.reportDownloadLink.classList.remove("is-hidden");
+      }
+
+      /* =========================
+         UI Events
+      ========================= */
+      /**
+       * セッションボタンの表示・状態（class/text）を更新
+       * @param {boolean} running
+       */
+      function updateSessionToggleUI(running) {
+        if (running) {
+          el.sessionToggleBtn.textContent = "セッション停止";
+          el.sessionToggleBtn.classList.add("recording");
+        } else {
+          el.sessionToggleBtn.textContent = "セッション開始";
+          el.sessionToggleBtn.classList.remove("recording");
+        }
+      }
+
+      /**
+       * 無音声ボタン
+       */
+      function updateRealtimeButtons() {
+        const enabled = state.sessionRunning; // セッション中は押せる
+        el.forceSilenceBtn.disabled = !enabled;
+        // 再接続は「切れている or 任意に押したい」想定でセッション中は有効
+        el.reconnectBtn.disabled = !enabled || state.reconnecting;
+      }
+
+      /**
+       * メモ送信処理（入力チェック→挿入→クリア→高さ調整）
+       */
+      function sendMemoFromInput() {
+        const text = el.textInput.value.trim();
+        if (!text) return;
+
+        insertMemoToAllContainers(text);
+        el.textInput.value = "";
+        autoResizeTextarea(el.textInput);
+      }
+
+      /**
+       * セッション開始/停止をトグルする（UIも同期更新）
+       */
+      async function toggleSession() {
+        if (!state.sessionRunning) {
+          if (!hasApiKey()) {
+            alert(
+              "APIキーが未設定のため、セッション開始できません。\n右上の歯車から設定してください。",
+            );
+            openSettings();
+            return;
+          }
+
+          await startSession();
+          state.sessionRunning = true;
+          updateSessionToggleUI(true);
+          updateRealtimeButtons();
+          startSessionLimitTimer();
+        } else {
+          stopSession();
+          state.sessionRunning = false;
+          updateSessionToggleUI(false);
+          updateRealtimeButtons();
+          clearSessionLimitTimer();
+          updateApiKeyGateUI();
+        }
+      }
+
+      /**
+       * data-actionによるクリックイベント委譲
+       */
+      document.addEventListener("click", async (e) => {
+        const button = e.target.closest("[data-action]");
+        if (!button) return;
+
+        switch (button.dataset.action) {
+          case "toggle-session":
+            await toggleSession();
+            return;
+
+          case "send-memo":
+            sendMemoFromInput();
+            return;
+
+          case "copy-memos":
+            copyMemosOnlyToClipboard();
+            return;
+
+          case "copy": {
+            const targetId = button.dataset.target;
+            if (!targetId) return;
+            copyContainerParagraphs(targetId, button);
+            return;
+          }
+
+          case "generate-report":
+            await generateReport();
+            return;
+
+          case "copy-report": {
+            const text = (el.reportOutput?.textContent || "").trim();
+            if (!text) return;
+            copyTextToClipboard(text, button);
+            return;
+          }
+
+          case "clear-all": {
+            const ok = confirm("全て消去しますか？");
+            if (!ok) return;
+            clearConversationPanels();
+            return;
+          }
+
+          case "force-silence":
+            forceSilenceCut();
+            temporarilyDisableButton(el.forceSilenceBtn, 500);
+            return;
+
+          case "reconnect-session":
+            await reconnectSession();
+            return;
+
+          case "open-settings":
+            openSettings();
+            return;
+
+          case "close-settings":
+            closeSettings();
+            return;
+
+          case "save-api-key": {
+            const key = (el.apiKeyInput.value || "").trim();
+            if (!key) {
+              alert("APIキーを入力してください。");
+              return;
+            }
+            saveApiKey(key);
+            closeSettings();
+            updateApiKeyGateUI();
+            alert("APIキーを保存しました。");
+            return;
+          }
+
+          case "delete-api-key": {
+            const ok = confirm("保存済みのAPIキーを削除しますか？");
+            if (!ok) return;
+            deleteApiKey();
+            el.apiKeyInput.value = "";
+            closeSettings();
+            updateApiKeyGateUI();
+            alert("APIキーを削除しました。");
+            return;
+          }
+          default:
+            return;
+        }
+      });
+
+      /**
+       * Textarea: Enterで送信、Shift+Enter等は改行
+       */
+      el.textInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+          e.preventDefault();
+          document.querySelector('[data-action="send-memo"]')?.click();
+          autoResizeTextarea(el.textInput);
+        }
+      });
+
+      /**
+       * Textarea: 入力に応じて自動リサイズ
+       */
+      el.textInput.addEventListener("input", () =>
+        autoResizeTextarea(el.textInput),
+      );
+
+      // 初期化
+      initLanguageSelects();
+      updateApiKeyGateUI();
+    </script>
+  </body>
+</html>
