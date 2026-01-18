@@ -184,10 +184,13 @@
         text-decoration: underline;
         cursor: pointer;
         font-size: 14px;
+        font-weight: 600;
       }
+
       .textLink:hover {
         color: var(--color-primary-hover);
       }
+
       .textLink i {
         margin-right: 6px;
         opacity: 0.85;
@@ -523,6 +526,11 @@
          レスポンシブ対応
       ========================= */
       @media (max-width: 768px) {
+        .column {
+          flex: 0 0 100%;
+          scroll-snap-align: start;
+        }
+
         #conversationWrapper {
           flex-direction: row;
           overflow-x: auto;
@@ -532,11 +540,6 @@
           gap: 12px;
 
           padding-right: 0;
-        }
-
-        .column {
-          flex: 0 0 100%;
-          scroll-snap-align: start;
         }
 
         #conversationWrapper::after {
@@ -746,6 +749,16 @@
           ></i>
           議事録
           <span class="panelTitle__actions">
+            <a
+              id="reportDownloadLink"
+              href="#"
+              download="report.txt"
+              class="textLink is-hidden"
+            >
+              <i class="fa-solid fa-download" aria-hidden="true"></i>
+              テキスト
+            </a>
+
             <button
               id="generateReportBtn"
               class="btn"
@@ -770,18 +783,6 @@
           </button>
 
           <pre id="reportOutput" class="chatBox__message reportOutput"></pre>
-        </div>
-
-        <div class="reportActions">
-          <a
-            id="reportDownloadLink"
-            href="#"
-            download="report.txt"
-            class="textLink is-hidden"
-          >
-            <i class="fa-solid fa-download" aria-hidden="true"></i>
-            テキスト
-          </a>
         </div>
       </div>
 
@@ -1802,7 +1803,6 @@
           const aiRaw = getParagraphsText(el.aiContainer);
           const prompt = buildReportPrompt(transcriptRaw, aiRaw);
 
-          el.reportOutput.textContent = "生成中...";
           el.reportDownloadLink.classList.add("is-hidden");
           el.reportDownloadLink.href = "#";
 
