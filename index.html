@@ -585,7 +585,7 @@
           </button>
 
           <a
-            id="downloadLink"
+            id="mediaDownloadLink"
             href="#"
             download="session_audio.webm"
             class="textLink is-hidden"
@@ -972,7 +972,7 @@
         sessionToggleBtn: document.getElementById("sessionToggleBtn"),
         forceSilenceBtn: document.getElementById("forceSilenceBtn"),
         reconnectBtn: document.getElementById("reconnectBtn"),
-        downloadLink: document.getElementById("downloadLink"),
+        mediaDownloadLink: document.getElementById("mediaDownloadLink"),
 
         // 言語セレクト
         transcriptLangSelect: document.getElementById("transcriptLang"),
@@ -1244,6 +1244,10 @@
           c.map.clear();
         }
 
+        // 音声リンクも消す
+        el.mediaDownloadLink.classList.add("is-hidden");
+        el.mediaDownloadLink.href = "#";
+
         // メモ入力欄も消す
         el.textInput.value = "";
         autoResizeTextarea(el.textInput);
@@ -1512,8 +1516,8 @@
        * @param {string} url
        */
       function showAudioDownloadLink(url) {
-        el.downloadLink.href = url;
-        el.downloadLink.classList.remove("is-hidden");
+        el.mediaDownloadLink.href = url;
+        el.mediaDownloadLink.classList.remove("is-hidden");
       }
 
       /**
