@@ -315,9 +315,10 @@
       }
 
       #sessionToggleBtn {
-        min-width: 160px;
+        min-width: 84px;
         font-size: 16px;
         font-weight: 500;
+        padding: 6px 10px;
       }
 
       #sessionToggleBtn.recording {
@@ -547,7 +548,7 @@
             class="btn"
             data-action="toggle-session"
           >
-            セッション開始
+            <i class="fa-solid fa-play" aria-hidden="true"></i> 開始
           </button>
 
           <button
@@ -1197,7 +1198,7 @@
       }
 
       function openSettings() {
-        el.apiKeyInput.value = loadApiKey(); // 既存を表示
+        el.apiKeyInput.value = loadApiKey();
         el.settingsModal.classList.remove("is-hidden");
         setTimeout(() => el.apiKeyInput?.focus(), 0);
       }
@@ -1207,7 +1208,6 @@
       }
 
       function updateApiKeyGateUI() {
-        // APIキーが無い場合「セッション開始」できない（停止はできるようにする）
         const canStart = hasApiKey();
         if (!state.sessionRunning) {
           el.sessionToggleBtn.disabled = !canStart;
@@ -1904,10 +1904,16 @@
        */
       function updateSessionToggleUI(running) {
         if (running) {
-          el.sessionToggleBtn.textContent = "セッション停止";
+          el.sessionToggleBtn.innerHTML =
+            '<i class="fa-solid fa-stop" aria-hidden="true"></i> 停止';
+          el.sessionToggleBtn.setAttribute("aria-label", "停止");
+          el.sessionToggleBtn.title = "停止";
           el.sessionToggleBtn.classList.add("recording");
         } else {
-          el.sessionToggleBtn.textContent = "セッション開始";
+          el.sessionToggleBtn.innerHTML =
+            '<i class="fa-solid fa-play" aria-hidden="true"></i> 開始';
+          el.sessionToggleBtn.setAttribute("aria-label", "開始");
+          el.sessionToggleBtn.title = "開始";
           el.sessionToggleBtn.classList.remove("recording");
         }
       }
@@ -1941,7 +1947,7 @@
         if (!state.sessionRunning) {
           if (!hasApiKey()) {
             alert(
-              "APIキーが未設定のため、セッション開始できません。\n右上の歯車から設定してください。",
+              "APIキーが未設定のため開始できません。\n右上の歯車から設定してください。",
             );
             openSettings();
             return;
