@@ -869,6 +869,10 @@
         reconnecting: false,
         sessionStartedAt: 0,
         sessionLimitTimerId: null,
+        reconnectAttempt: 0,
+        reconnectTimerId: null,
+        disconnectedTimerId: null,
+        autoSilenceTimerId: null,
       };
 
       /* =========================
@@ -1244,15 +1248,12 @@
           c.map.clear();
         }
 
-        // 音声リンクも消す
         el.mediaDownloadLink.classList.add("is-hidden");
         el.mediaDownloadLink.href = "#";
 
-        // メモ入力欄も消す
         el.textInput.value = "";
         autoResizeTextarea(el.textInput);
 
-        // 議事録も消す（生成結果・DLリンク）
         el.reportOutput.textContent = "";
         el.reportDownloadLink.classList.add("is-hidden");
         el.reportDownloadLink.href = "#";
@@ -1363,13 +1364,16 @@
         const out = getLangInfo(el.aiLangSelect.value).ja;
         return `
           #命令
-          ・あなたはリアルタイム通訳アシスタントです。以下の文章を正確かつ自然な ${out} に通訳してください。
+          ・あなたはリアルタイム通訳アシスタントです。
           #制約条件
-          ・出力は通訳文のみ（解説・前置き不要）
+          ・正確かつ自然な${out}に通訳してください。
+          ・出力は通訳文のみ（前置き不要）
           ・日常会話からビジネス文書まで適切な${out}表現を用いる
           ・文脈やニュアンスを考慮し、直訳ではなく意図が伝わる自然な表現とする
-          ・専門用語や固有名詞は適宜${out}表記に変換
+          ・専門用語や固有名詞は適宜${out}で補足する
+          ・必要に応じて最新の情報を参照すること
           ・文章の形式や敬語のレベルは${out}圏の標準に合わせる
+          ・応答速度を優先し、短く端的に答えること
         `;
       }
 
@@ -1404,16 +1408,15 @@
       function buildReportPrompt(transcript, summary) {
         return `
         #命令
-        ・以下は会議内容のAI要約と文字起こしデータです。
+        ・以下は会議内容の文字起こしデータです。
         ・日本語の議事録にまとめて。
         #制約条件
         ・出力は議事録のみ（解説・前置き不要）。
+        ・事実だけに基づいて生成し、推論を含めないこと。
         ・AI要約の内容を優先すること。
         ・ただし、情報が不足する場合は文字起こしを参照すること。
         ・「メモ：」と記載された内容は確認済みの情報であり、最も信ぴょう性が高い。
-        ・事実だけに基づいて生成し、推論を含めないこと。
-        ・なるべくたくさんの詳細情報を含め、可能な限り詳しいレポートとすること。
-        #AI要約：${summary}
+        ・なるべくたくさんの詳細情報を含め、可能な限り詳しい内容で記載すること。
         #文字起こし：${transcript}`;
       }
 
@@ -1481,8 +1484,30 @@
        * WebRTC関連（DataChannel/PeerConnection）を閉じる
        */
       function closeRealtimeConnection() {
-        state.dc?.close();
-        state.pc?.close();
+        try {
+          if (state.dc) {
+            state.dc.onopen = null;
+            state.dc.onclose = null;
+            state.dc.onmessage = null;
+            state.dc.onerror = null;
+            state.dc.close();
+          }
+        } catch {}
+
+        try {
+          if (state.pc) {
+            state.pc.oniceconnectionstatechange = null;
+            state.pc.onconnectionstatechange = null;
+            state.pc.onicecandidate = null;
+            state.pc.onicecandidateerror = null;
+            state.pc.close();
+          }
+        } catch {}
+
+        state.dc = null;
+        state.pc = null;
+
+        clearAutoReconnectTimers();
       }
 
       /**
@@ -1570,6 +1595,12 @@
                 modalities: ["text"], // 音声を作らせない（=再生不要）
                 instructions: buildSystemPrompt(),
                 input_audio_transcription: { model: CONFIG.TRANSCRIBE_MODEL },
+                turn_detection: {
+                  type: "server_vad",
+                  silence_duration_ms: 250,
+                  prefix_padding_ms: 200,
+                  // threshold: 0.6, // 大きいほど「音声」と判定しにくい(環境で調整)
+                },
               },
             }),
           );
@@ -1581,16 +1612,78 @@
         state.dc.onclose = () => {
           state.realtimeConnected = false;
           updateRealtimeButtons();
+          scheduleAutoReconnect("dc.onclose", { immediate: true });
         };
 
         state.dc.onerror = () => {
           state.realtimeConnected = false;
           updateRealtimeButtons();
+          scheduleAutoReconnect("dc.onerror", { immediate: true });
+        };
+
+        state.pc.oniceconnectionstatechange = () => {
+          const s = state.pc?.iceConnectionState;
+          console.warn("[pc] iceConnectionState =", s);
+
+          if (s === "connected" || s === "completed") {
+            markConnected();
+            return;
+          }
+
+          if (s === "disconnected") {
+            if (!state.disconnectedTimerId) {
+              state.disconnectedTimerId = setTimeout(() => {
+                state.disconnectedTimerId = null;
+                const now = state.pc?.iceConnectionState;
+                if (now === "disconnected") {
+                  state.realtimeConnected = false;
+                  updateRealtimeButtons();
+                  scheduleAutoReconnect("ice.disconnected-timeout");
+                }
+              }, 7000);
+            }
+            return;
+          }
+
+          if (s === "failed") {
+            state.realtimeConnected = false;
+            updateRealtimeButtons();
+            scheduleAutoReconnect("ice.failed", { immediate: true });
+          }
         };
 
         state.pc.onconnectionstatechange = () => {
           const s = state.pc?.connectionState;
-          if (s === "failed" || s === "disconnected" || s === "closed") {
+          console.warn("[pc] connectionState =", s);
+
+          if (s === "connected") {
+            markConnected();
+            return;
+          }
+
+          if (s === "disconnected") {
+            if (!state.disconnectedTimerId) {
+              state.disconnectedTimerId = setTimeout(() => {
+                state.disconnectedTimerId = null;
+                const now = state.pc?.connectionState;
+                if (now === "disconnected") {
+                  state.realtimeConnected = false;
+                  updateRealtimeButtons();
+                  scheduleAutoReconnect("pc.disconnected-timeout");
+                }
+              }, 7000);
+            }
+            return;
+          }
+
+          if (s === "failed") {
+            state.realtimeConnected = false;
+            updateRealtimeButtons();
+            scheduleAutoReconnect("pc.failed", { immediate: true });
+            return;
+          }
+
+          if (s === "closed") {
             state.realtimeConnected = false;
             updateRealtimeButtons();
           }
@@ -1707,6 +1800,80 @@
       }
 
       /* =========================
+         Reconnect Handler
+      ========================= */
+      function clearAutoReconnectTimers() {
+        if (state.reconnectTimerId) {
+          clearTimeout(state.reconnectTimerId);
+          state.reconnectTimerId = null;
+        }
+        if (state.disconnectedTimerId) {
+          clearTimeout(state.disconnectedTimerId);
+          state.disconnectedTimerId = null;
+        }
+      }
+
+      function markConnected() {
+        state.realtimeConnected = true;
+        state.reconnectAttempt = 0;
+        clearAutoReconnectTimers();
+        updateRealtimeButtons();
+      }
+
+      /**
+       * 自動再接続を予約する
+       * @param {string} reason
+       * @param {{immediate?: boolean}} opts
+       */
+      function scheduleAutoReconnect(reason, { immediate = false } = {}) {
+        if (!state.sessionRunning) return;
+        if (state.reconnecting) return;
+        if (state.reconnectTimerId) return;
+
+        const attempt = state.reconnectAttempt;
+        const base = Math.min(30000, 1000 * Math.pow(2, attempt)); // 1s,2s,4s...最大30s
+        const jitter = Math.floor(Math.random() * 400); // 0-400ms ばらつき
+        const wait = immediate ? 0 : base + jitter;
+
+        console.warn(
+          `[auto-reconnect] scheduled in ${wait}ms (attempt=${attempt}) reason=${reason}`,
+        );
+
+        state.reconnectTimerId = setTimeout(async () => {
+          state.reconnectTimerId = null;
+          if (!state.sessionRunning) return;
+
+          try {
+            state.reconnectAttempt++;
+            await reconnectSession();
+            markConnected();
+          } catch (e) {
+            console.error("[auto-reconnect] reconnect failed:", e);
+            scheduleAutoReconnect("retry-after-failure");
+          }
+        }, wait);
+      }
+
+      /* =========================
+         SilenceHandler
+      ========================= */
+      function startAutoSilence({ intervalMs = 10000, cutMs = 250 } = {}) {
+        stopAutoSilence();
+
+        state.autoSilenceTimerId = setInterval(() => {
+          if (!state.sessionRunning) return;
+          forceSilenceCut(cutMs);
+        }, intervalMs);
+      }
+
+      function stopAutoSilence() {
+        if (state.autoSilenceTimerId) {
+          clearInterval(state.autoSilenceTimerId);
+          state.autoSilenceTimerId = null;
+        }
+      }
+
+      /* =========================
          Translate
       ========================= */
       /**
@@ -1805,7 +1972,7 @@
         try {
           const transcriptRaw = getParagraphsText(el.transcriptContainer);
           const aiRaw = getParagraphsText(el.aiContainer);
-          const prompt = buildReportPrompt(transcriptRaw, aiRaw);
+          const prompt = buildReportPrompt(transcriptRaw);
 
           el.reportDownloadLink.classList.add("is-hidden");
           el.reportDownloadLink.href = "#";
@@ -1816,7 +1983,7 @@
           // 画面表示：AI生成の議事録のみ
           el.reportOutput.textContent = main;
 
-          // ダウンロード用：コメント除外した各セクション + 最後にコメント一覧
+          // ダウンロード用：コメント除外した各セクション + メモ一覧
           const transcriptNoComments = getParagraphsTextWithoutComments(
             el.transcriptContainer,
           );
@@ -1829,8 +1996,11 @@
           const sep = "\n\n" + "─".repeat(40) + "\n\n";
 
           const downloadText =
-            "【AI生成 議事録】\n" +
+            "【議事録】\n" +
             (main || "（空）") +
+            sep +
+            "【メモ一覧】\n" +
+            (comments || "（なし）") +
             sep +
             "【文字起こし】\n" +
             (transcriptNoComments || "（空）") +
@@ -1839,10 +2009,7 @@
             (translationNoComments || "（空）") +
             sep +
             "【AI応答】\n" +
-            (aiNoComments || "（空）") +
-            sep +
-            "【コメント一覧】\n" +
-            (comments || "（なし）");
+            (aiNoComments || "（空）");
 
           setReportDownloadLink("report.txt", downloadText);
           el.reportBox.scrollTop = 0;
@@ -1970,6 +2137,7 @@
           updateSessionToggleUI(true);
           updateRealtimeButtons();
           startSessionLimitTimer();
+          startAutoSilence({ intervalMs: 10000, cutMs: 250 });
         } else {
           stopSession();
           state.sessionRunning = false;
@@ -1977,6 +2145,7 @@
           updateRealtimeButtons();
           clearSessionLimitTimer();
           updateApiKeyGateUI();
+          stopAutoSilence();
         }
       }
 
