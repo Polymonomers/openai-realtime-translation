@@ -3,8 +3,6 @@
   <head>
     <meta charset="UTF-8" />
     <title>TransReport AI</title>
-
-    <!-- レスポンシブ対応 -->
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
     <link
@@ -111,7 +109,7 @@
       }
 
       /* =========================
-         Base
+        Base
       ========================= */
       body {
         font-family:
@@ -177,7 +175,7 @@
       }
 
       /* =========================
-         Link
+        Link
       ========================= */
       .textLink {
         color: var(--color-primary);
@@ -201,7 +199,7 @@
       }
 
       /* =========================
-         Button Component
+        Button Component
       ========================= */
       .btn {
         border: 1px solid var(--color-border);
@@ -288,7 +286,7 @@
       }
 
       /* =========================
-         Select Component
+        Select Component
       ========================= */
       .select {
         appearance: none;
@@ -318,7 +316,7 @@
       }
 
       /* =========================
-         Controls
+        Controls
       ========================= */
       #controls {
         margin-bottom: 8px;
@@ -341,7 +339,7 @@
       }
 
       /* =========================
-         chatBox Component
+        chatBox Component
       ========================= */
       .chatBox {
         position: relative;
@@ -385,7 +383,7 @@
       }
 
       /* =========================
-         report Component
+        report Component
       ========================= */
       .reportOutput {
         margin: 0;
@@ -402,7 +400,7 @@
       }
 
       /* =========================
-         inputGroup Component
+        inputGroup Component
       ========================= */
       #textInputWrapper {
         display: flex;
@@ -524,7 +522,7 @@
       }
 
       /* =========================
-         レスポンシブ対応
+        レスポンシブ対応
       ========================= */
       @media (max-width: 768px) {
         .column {
@@ -843,13 +841,14 @@
 
     <script>
       /* =========================
-         Config / State
+        Config / State
       ========================= */
       /**
        * アプリの設定値
        */
       const CONFIG = {
-        WEBRTC_URL: "https://api.openai.com/v1/realtime?model=gpt-realtime",
+        WEBRTC_URL:
+          "https://api.openai.com/v1/realtime?model=gpt-realtime-mini",
         TRANSCRIBE_MODEL: "gpt-4o-mini-transcribe",
         REPORT_MODEL: "gpt-4.1-mini",
         TRANSLATE_MODEL: "gpt-4.1-nano",
@@ -877,7 +876,7 @@
       };
 
       /* =========================
-         Language (single source of truth)
+        Language
       ========================= */
       /**
        * 言語定義（日本語名/英語名）を一元管理する
@@ -967,7 +966,7 @@
       }
 
       /* =========================
-         DOM
+        DOM
       ========================= */
       /**
        * DOM参照を集約
@@ -1005,7 +1004,7 @@
       };
 
       /* =========================
-         Stores (item_id => <p>)
+        Stores
       ========================= */
       /**
        * Realtimeのitem_id等と表示DOMの対応を保持
@@ -1020,7 +1019,7 @@
       };
 
       /* =========================
-         Utilities
+        Utilities
       ========================= */
       /**
        * 対象コンテナを最下部までスクロールする
@@ -1127,7 +1126,6 @@
         const track = state.micStream.getAudioTracks()?.[0];
         if (!track) return;
 
-        // 送出を一時的に止めて VAD に「無音」を作る
         track.enabled = false;
         setTimeout(() => {
           track.enabled = true;
@@ -1232,10 +1230,10 @@
       }
 
       /* =========================
-         Clear all
+        Clear all
       ========================= */
       /**
-       * 文字起こし・翻訳・AI回答の表示と内部Mapをまとめてクリアする。
+       * 文字起こし・翻訳・AI回答の表示と内部Mapをまとめてクリア
        */
       function clearConversationPanels() {
         const containers = [
@@ -1261,7 +1259,7 @@
       }
 
       /* =========================
-         Clipboard
+        Clipboard
       ========================= */
       /**
        * 指定コンテナ内の<p>を結合してクリップボードにコピーする
@@ -1330,7 +1328,7 @@
       }
 
       /* =========================
-         Memo (manual insert)
+        Memo (manual insert)
       ========================= */
       /**
        * 入力テキストを「メモ」として3カラム全てに同時挿入する
@@ -1355,7 +1353,7 @@
       }
 
       /* =========================
-         Prompt
+        Prompt
       ========================= */
       /**
        * Realtimeセッション用のシステムプロンプト
@@ -1408,21 +1406,21 @@
 
       function buildReportPrompt(transcript, summary) {
         return `
-        #命令
-        ・以下は会議内容の文字起こしデータです。
-        ・日本語の議事録にまとめて。
-        #制約条件
-        ・出力は議事録のみ（解説・前置き不要）。
-        ・事実だけに基づいて生成し、推論を含めないこと。
-        ・AI要約の内容を優先すること。
-        ・ただし、情報が不足する場合は文字起こしを参照すること。
-        ・「メモ：」と記載された内容は確認済みの情報であり、最も信ぴょう性が高い。
-        ・なるべくたくさんの詳細情報を含め、可能な限り詳しい内容で記載すること。
-        #文字起こし：${transcript}`;
+          #命令
+          ・以下は会議内容の文字起こしデータです。
+          ・日本語の議事録にまとめて。
+          #制約条件
+          ・出力は議事録のみ（解説・前置き不要）。
+          ・事実だけに基づいて生成し、推論を含めないこと。
+          ・AI要約の内容を優先すること。
+          ・ただし、情報が不足する場合は文字起こしを参照すること。
+          ・「メモ：」と記載された内容は確認済みの情報であり、最も信ぴょう性が高い。
+          ・なるべくたくさんの詳細情報を含め、可能な限り詳しい内容で記載すること。
+          #文字起こし：${transcript}`;
       }
 
       /* =========================
-         Session Control
+        Session Control
       ========================= */
       /**
        * セッションを開始する
@@ -1600,7 +1598,7 @@
                   type: "server_vad",
                   silence_duration_ms: 250,
                   prefix_padding_ms: 200,
-                  // threshold: 0.6, // 大きいほど「音声」と判定しにくい(環境で調整)
+                  // threshold: 0.6, // 大きいほど音声と判定しにくい(環境で調整)
                 },
               },
             }),
@@ -1724,7 +1722,7 @@
       }
 
       /* =========================
-         DataChannel Handling
+        DataChannel Handling
       ========================= */
       /**
        * Realtime APIのDataChannelメッセージを処理してUIに反映
@@ -1754,6 +1752,12 @@
             const itemId = msg.item_id;
             const p = store.userSpeech.get(itemId);
 
+            const finalText =
+              msg.transcript ?? msg.text ?? msg?.content?.[0]?.text;
+            if (p && typeof finalText === "string" && finalText.trim()) {
+              p.textContent = finalText;
+            }
+
             if (p && el.translateLangSelect.value !== "none") {
               translateText(itemId, p.textContent);
             }
@@ -1761,10 +1765,9 @@
             state.dc?.send(
               JSON.stringify({
                 type: "response.create",
-                response: { modalities: ["text"] }, // テキストのみ
+                response: { modalities: ["text"] },
               }),
             );
-            return;
           }
 
           case "conversation.item.created": {
@@ -1801,7 +1804,7 @@
       }
 
       /* =========================
-         Reconnect Handler
+        Reconnect Handler
       ========================= */
       function clearAutoReconnectTimers() {
         if (state.reconnectTimerId) {
@@ -1856,7 +1859,7 @@
       }
 
       /* =========================
-         SilenceHandler
+        SilenceHandler
       ========================= */
       function startAutoSilence({ intervalMs = 10000, cutMs = 250 } = {}) {
         stopAutoSilence();
@@ -1875,7 +1878,7 @@
       }
 
       /* =========================
-         Translate
+        Translate
       ========================= */
       /**
        * APIで翻訳し、翻訳欄を更新する
@@ -1956,8 +1959,8 @@
       }
 
       /* =========================
-         Report Generation
-      ========================= */
+        Report Generation
+      ======================== */
       /**
        * 文字起こしとAI応答から議事録生成
        */
@@ -2076,7 +2079,7 @@
       }
 
       /* =========================
-         UI Events
+        UI Events
       ========================= */
       /**
        * セッションボタンの表示・状態（class/text）を更新
