@@ -522,6 +522,113 @@
       }
 
       /* =========================
+        History Drawer
+      ========================= */
+      .drawer {
+        position: fixed;
+        inset: 0;
+        z-index: 10001;
+      }
+
+      .drawer__backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.35);
+      }
+
+      .drawer__panel {
+        position: absolute;
+        top: 0;
+        right: 0;
+        height: 100%;
+        width: min(420px, calc(100vw - 36px));
+        background: var(--color-bg);
+        border-left: 1px solid var(--color-border);
+        box-shadow: -20px 0 60px rgba(0, 0, 0, 0.18);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .drawer__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--color-border);
+      }
+
+      .drawer__title {
+        margin: 0;
+        font-size: 16px;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .drawer__body {
+        padding: 12px 14px;
+        overflow: auto;
+      }
+
+      .drawer__actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+
+      .drawer__hint {
+        margin-top: 12px;
+        font-size: 12px;
+        opacity: 0.75;
+      }
+
+      /* =========================
+        History List
+      ========================= */
+      .historyList {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .historyItem {
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg);
+        padding: 10px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .historyItem__main {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .historyItem__title {
+        font-weight: 700;
+        font-size: 14px;
+        margin: 0 0 4px;
+      }
+
+      .historyItem__meta {
+        font-size: 12px;
+        opacity: 0.75;
+        margin: 0;
+      }
+
+      .historyItem__btn {
+        white-space: nowrap;
+      }
+
+      .historyItem__delete {
+        opacity: 0.7;
+      }
+
+      /* =========================
         レスポンシブ対応
       ========================= */
       @media (max-width: 768px) {
@@ -799,7 +906,7 @@
           <div class="modal__header">
             <h3 id="settingsTitle" class="modal__title">
               <i class="fa-solid fa-gear" aria-hidden="true"></i>
-              設定
+              APIキー設定
             </h3>
             <button
               class="btn btn--icon"
@@ -837,6 +944,57 @@
           </div>
         </div>
       </div>
+      <div
+        id="historyDrawer"
+        class="drawer is-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-label="履歴"
+      >
+        <div class="drawer__backdrop" data-action="close-history"></div>
+
+        <aside class="drawer__panel">
+          <div class="drawer__header">
+            <h3 class="drawer__title">
+              <i class="fa-solid fa-gear" aria-hidden="true"></i>
+              設定
+            </h3>
+            <button
+              class="btn btn--icon"
+              data-action="close-history"
+              aria-label="閉じる"
+              title="閉じる"
+            >
+              <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="drawer__body">
+            <div class="drawer__actions">
+              <button class="btn" data-action="open-settings-modal">
+                <i class="fa-solid fa-key" aria-hidden="true"></i>
+                APIキー
+              </button>
+
+              <button
+                class="btn"
+                data-action="clear-history"
+                title="履歴全削除"
+              >
+                <i class="fa-solid fa-trash" aria-hidden="true"></i>
+                履歴削除
+              </button>
+            </div>
+
+            <div id="historyList" class="historyList"></div>
+
+            <div class="drawer__hint">
+              <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>
+              最大10件まで保存します（古いものから自動削除）
+            </div>
+          </div>
+        </aside>
+      </div>
     </div>
 
     <script>
@@ -850,9 +1008,10 @@
         WEBRTC_URL:
           "https://api.openai.com/v1/realtime?model=gpt-realtime-mini",
         TRANSCRIBE_MODEL: "gpt-4o-mini-transcribe",
-        REPORT_MODEL: "gpt-4.1-mini",
+        REPORT_MODEL: "gpt-5.2",
         TRANSLATE_MODEL: "gpt-4.1-nano",
         MAX_SESSION_MS: 6 * 60 * 60 * 1000, // 6時間
+        HISTORY_MAX: 10,
       };
 
       /**
@@ -873,6 +1032,8 @@
         reconnectTimerId: null,
         disconnectedTimerId: null,
         autoSilenceTimerId: null,
+        historyCurrentId: null,
+        historySaveTimerId: null,
       };
 
       /* =========================
@@ -1001,6 +1162,10 @@
         // 設定
         settingsModal: document.getElementById("settingsModal"),
         apiKeyInput: document.getElementById("apiKeyInput"),
+
+        // 履歴
+        historyDrawer: document.getElementById("historyDrawer"),
+        historyList: document.getElementById("historyList"),
       };
 
       /* =========================
@@ -1182,6 +1347,7 @@
       ========================= */
       const STORAGE_KEYS = {
         OPENAI_API_KEY: "openai_api_key",
+        HISTORY: "transreport_history_v1",
       };
 
       function loadApiKey() {
@@ -1209,7 +1375,7 @@
         return k;
       }
 
-      function openSettings() {
+      function openKeyModal() {
         el.apiKeyInput.value = loadApiKey();
         el.settingsModal.classList.remove("is-hidden");
         setTimeout(() => el.apiKeyInput?.focus(), 0);
@@ -1411,11 +1577,10 @@
           ・日本語の議事録にまとめて。
           #制約条件
           ・出力は議事録のみ（解説・前置き不要）。
+          ・Wordなどで扱いやすいレポート形式とし、Markdown記法は使わないこと。
           ・事実だけに基づいて生成し、推論を含めないこと。
-          ・AI要約の内容を優先すること。
-          ・ただし、情報が不足する場合は文字起こしを参照すること。
-          ・「メモ：」と記載された内容は確認済みの情報であり、最も信ぴょう性が高い。
           ・なるべくたくさんの詳細情報を含め、可能な限り詳しい内容で記載すること。
+          ・「メモ：」と記載された内容は確認済みの情報であり、最も信ぴょう性が高い。
           #文字起こし：${transcript}`;
       }
 
@@ -1768,6 +1933,9 @@
                 response: { modalities: ["text"] },
               }),
             );
+
+            requestPersistHistorySnapshot();
+            return;
           }
 
           case "conversation.item.created": {
@@ -2132,11 +2300,11 @@
             alert(
               "APIキーが未設定のため開始できません。\n右上の歯車から設定してください。",
             );
-            openSettings();
+            openKeyModal();
             return;
           }
-
           await startSession();
+          beginHistorySession();
           state.sessionRunning = true;
           updateSessionToggleUI(true);
           updateRealtimeButtons();
@@ -2144,6 +2312,7 @@
           startAutoSilence({ intervalMs: 10000, cutMs: 250 });
         } else {
           stopSession();
+          requestPersistHistorySnapshot({ debounceMs: 0 });
           state.sessionRunning = false;
           updateSessionToggleUI(false);
           updateRealtimeButtons();
@@ -2167,6 +2336,7 @@
 
           case "send-memo":
             sendMemoFromInput();
+            requestPersistHistorySnapshot();
             return;
 
           case "copy-memos":
@@ -2182,6 +2352,7 @@
 
           case "generate-report":
             await generateReport();
+            requestPersistHistorySnapshot();
             return;
 
           case "copy-report": {
@@ -2208,7 +2379,7 @@
             return;
 
           case "open-settings":
-            openSettings();
+            openHistoryDrawer();
             return;
 
           case "close-settings":
@@ -2238,20 +2409,316 @@
             alert("APIキーを削除しました。");
             return;
           }
+
+          case "close-history":
+            closeHistoryDrawer();
+            return;
+
+          case "open-settings-modal":
+            closeHistoryDrawer();
+            openKeyModal();
+            return;
+
+          case "restore-history": {
+            const id = button.dataset.historyId;
+            if (!id) return;
+            restoreHistoryById(id);
+            return;
+          }
+
+          case "delete-history": {
+            const id = button.dataset.historyId;
+            if (!id) return;
+            const ok = confirm("この履歴を削除しますか？");
+            if (!ok) return;
+            deleteHistoryById(id);
+            return;
+          }
+
+          case "clear-history": {
+            const ok = confirm("履歴を全て削除しますか？");
+            if (!ok) return;
+            clearHistoryAll();
+            return;
+          }
+
           default:
             return;
         }
       });
 
+      /* =========================
+        History (localStorage)
+      ========================= */
+      function pad2(n) {
+        return String(n).padStart(2, "0");
+      }
+
+      function formatTitleFromTs(ts) {
+        const d = new Date(ts);
+        return `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(
+          d.getHours(),
+        )}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+      }
+
+      function loadHistoryList() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEYS.HISTORY);
+          const arr = JSON.parse(raw || "[]");
+          return Array.isArray(arr) ? arr : [];
+        } catch {
+          return [];
+        }
+      }
+
+      function saveHistoryList(list) {
+        localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(list));
+      }
+
+      function serializeContainerWithVariants(container) {
+        return Array.from(container.querySelectorAll("p")).map((p, idx) => {
+          const cls = p.classList;
+          const variant = cls.contains("chatBox__message--memo")
+            ? "memo"
+            : cls.contains("chatBox__message--translate")
+              ? "translate"
+              : cls.contains("chatBox__message--ai")
+                ? "ai"
+                : "user";
+          return {
+            id: p.dataset.itemId || `p_${idx}_${Date.now()}`,
+            variant,
+            text: p.textContent || "",
+          };
+        });
+      }
+
+      function hydrateContainerFromItems(container, map, items) {
+        container.querySelectorAll("p").forEach((p) => p.remove());
+        map.clear();
+
+        for (const it of items || []) {
+          const p = createMessageParagraph(it.variant || "user", it.text || "");
+          p.dataset.itemId = it.id;
+          container.appendChild(p);
+          map.set(it.id, p);
+        }
+        scrollToBottom(container);
+      }
+
+      function buildHistorySnapshot() {
+        return {
+          langs: {
+            transcript: el.transcriptLangSelect.value,
+            translate: el.translateLangSelect.value,
+            ai: el.aiLangSelect.value,
+          },
+          transcriptItems: serializeContainerWithVariants(
+            el.transcriptContainer,
+          ),
+          translationItems: serializeContainerWithVariants(
+            el.translationContainer,
+          ),
+          aiItems: serializeContainerWithVariants(el.aiContainer),
+          reportText: el.reportOutput?.textContent || "",
+        };
+      }
+
+      function beginHistorySession() {
+        const startedAt = Date.now();
+        const id = String(startedAt);
+        const title = formatTitleFromTs(startedAt);
+
+        const entry = {
+          id,
+          title,
+          startedAt,
+          updatedAt: startedAt,
+          snapshot: {
+            langs: {
+              transcript: el.transcriptLangSelect.value,
+              translate: el.translateLangSelect.value,
+              ai: el.aiLangSelect.value,
+            },
+            transcriptItems: [],
+            translationItems: [],
+            aiItems: [],
+            reportText: "",
+          },
+        };
+
+        const list = loadHistoryList();
+        list.unshift(entry);
+        while (list.length > CONFIG.HISTORY_MAX) list.pop();
+        saveHistoryList(list);
+
+        state.historyCurrentId = id;
+        renderHistoryList();
+      }
+
+      function requestPersistHistorySnapshot({ debounceMs = 500 } = {}) {
+        if (!state.historyCurrentId) return;
+
+        if (state.historySaveTimerId) clearTimeout(state.historySaveTimerId);
+        state.historySaveTimerId = setTimeout(() => {
+          state.historySaveTimerId = null;
+
+          const list = loadHistoryList();
+          const idx = list.findIndex((x) => x.id === state.historyCurrentId);
+          if (idx === -1) return;
+
+          list[idx] = {
+            ...list[idx],
+            updatedAt: Date.now(),
+            snapshot: buildHistorySnapshot(),
+          };
+
+          saveHistoryList(list);
+          renderHistoryList();
+        }, debounceMs);
+      }
+
+      function restoreHistoryById(id) {
+        const list = loadHistoryList();
+        const entry = list.find((x) => x.id === id);
+        if (!entry) return;
+
+        const snap = entry.snapshot || {};
+
+        clearConversationPanels();
+
+        if (snap.langs) {
+          if (snap.langs.transcript)
+            el.transcriptLangSelect.value = snap.langs.transcript;
+          if (snap.langs.translate)
+            el.translateLangSelect.value = snap.langs.translate;
+          if (snap.langs.ai) el.aiLangSelect.value = snap.langs.ai;
+        }
+
+        hydrateContainerFromItems(
+          el.transcriptContainer,
+          store.userSpeech,
+          snap.transcriptItems,
+        );
+        hydrateContainerFromItems(
+          el.translationContainer,
+          store.translation,
+          snap.translationItems,
+        );
+        hydrateContainerFromItems(el.aiContainer, store.ai, snap.aiItems);
+
+        el.reportOutput.textContent = snap.reportText || "";
+
+        closeHistoryDrawer();
+      }
+
+      function deleteHistoryById(id) {
+        const list = loadHistoryList().filter((x) => x.id !== id);
+        saveHistoryList(list);
+        if (state.historyCurrentId === id) state.historyCurrentId = null;
+        renderHistoryList();
+      }
+
+      function clearHistoryAll() {
+        localStorage.removeItem(STORAGE_KEYS.HISTORY);
+        state.historyCurrentId = null;
+        renderHistoryList();
+      }
+
+      function renderHistoryList() {
+        if (!el.historyList) return;
+
+        const list = loadHistoryList();
+        el.historyList.innerHTML = "";
+
+        if (list.length === 0) {
+          const p = document.createElement("p");
+          p.style.opacity = "0.75";
+          p.textContent = "履歴はありません";
+          el.historyList.appendChild(p);
+          return;
+        }
+
+        for (const h of list) {
+          const row = document.createElement("div");
+          row.className = "historyItem";
+
+          const main = document.createElement("div");
+          main.className = "historyItem__main";
+
+          const title = document.createElement("p");
+          title.className = "historyItem__title";
+          title.textContent = h.title || "(無題)";
+
+          const meta = document.createElement("p");
+          meta.className = "historyItem__meta";
+          meta.textContent = `更新: ${formatTitleFromTs(h.updatedAt || h.startedAt || Date.now())}`;
+
+          main.appendChild(title);
+          main.appendChild(meta);
+
+          const restoreBtn = document.createElement("button");
+          restoreBtn.className = "btn historyItem__btn";
+          restoreBtn.dataset.action = "restore-history";
+          restoreBtn.dataset.historyId = h.id;
+          restoreBtn.innerHTML = `<i class="fa-solid fa-rotate-left" aria-hidden="true"></i> 復元`;
+
+          const delBtn = document.createElement("button");
+          delBtn.className = "btn btn--iconOnly historyItem__delete";
+          delBtn.dataset.action = "delete-history";
+          delBtn.dataset.historyId = h.id;
+          delBtn.title = "削除";
+          delBtn.setAttribute("aria-label", "削除");
+          delBtn.innerHTML = `<i class="fa-solid fa-trash" aria-hidden="true"></i>`;
+
+          row.appendChild(main);
+          row.appendChild(restoreBtn);
+          row.appendChild(delBtn);
+
+          el.historyList.appendChild(row);
+        }
+      }
+
+      function openHistoryDrawer() {
+        el.historyDrawer.classList.remove("is-hidden");
+        renderHistoryList();
+      }
+
+      function closeHistoryDrawer() {
+        el.historyDrawer.classList.add("is-hidden");
+      }
+
       /**
        * Textarea: Enterで送信、Shift+Enter等は改行
        */
+      function insertNewlineAtCursor(textarea) {
+        const start = textarea.selectionStart ?? textarea.value.length;
+        const end = textarea.selectionEnd ?? textarea.value.length;
+
+        const v = textarea.value;
+        textarea.value = v.slice(0, start) + "\n" + v.slice(end);
+
+        const next = start + 1;
+        textarea.selectionStart = next;
+        textarea.selectionEnd = next;
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
       el.textInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+        if (e.key !== "Enter") return;
+
+        const hasModifier = e.shiftKey || e.ctrlKey || e.altKey || e.metaKey;
+
+        if (!hasModifier) {
           e.preventDefault();
           document.querySelector('[data-action="send-memo"]')?.click();
           autoResizeTextarea(el.textInput);
+          return;
         }
+
+        e.preventDefault();
+        insertNewlineAtCursor(el.textInput);
+        autoResizeTextarea(el.textInput);
       });
 
       /**
@@ -2264,6 +2731,7 @@
       // 初期化
       initLanguageSelects();
       updateApiKeyGateUI();
+      renderHistoryList();
     </script>
   </body>
 </html>
