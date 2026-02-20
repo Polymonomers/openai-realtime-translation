@@ -1528,9 +1528,8 @@
       function buildSystemPrompt() {
         const out = getLangInfo(el.aiLangSelect.value).ja;
         return `
-          ・正確かつ自然な${out}に通訳してください。
-          ・出力は通訳文のみ（承知しましたなどの前置き不要）
-          ・応答速度を優先し、短く端的に答えること
+          ・正確かつ自然な${out}に翻訳すること
+          ・承知しましたなどの前置きは絶対に入れないこと
         `;
       }
 
@@ -2727,6 +2726,7 @@
     </script>
   </body>
 </html>
+
 
 
 
