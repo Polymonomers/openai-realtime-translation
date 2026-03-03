@@ -1010,6 +1010,9 @@
         TRANSCRIBE_MODEL: "gpt-4o-transcribe",
         REPORT_MODEL: "gpt-5.2",
         TRANSLATE_MODEL: "gpt-4.1-nano",
+        AI_CLEAN_MODEL: "gpt-4.1-mini",
+        // AI要約: 時間ではなく文字数ベースで区切る
+        AI_SUMMARY_CHUNK_CHARS: 100,
         MAX_SESSION_MS: 6 * 60 * 60 * 1000, // 6時間
         HISTORY_MAX: 10,
       };
@@ -1034,6 +1037,9 @@
         autoSilenceTimerId: null,
         historyCurrentId: null,
         historySaveTimerId: null,
+        // AI要約関連
+        aiSummaryTimerId: null, // 将来の拡張用（現仕様では未使用）
+        aiSummaryLastProcessedLength: 0,
       };
 
       /* =========================
@@ -1422,6 +1428,8 @@
         el.reportOutput.textContent = "";
         el.reportDownloadLink.classList.add("is-hidden");
         el.reportDownloadLink.href = "#";
+
+        state.aiSummaryLastProcessedLength = 0;
       }
 
       /* =========================
@@ -1526,17 +1534,34 @@
        * @returns {string}
        */
       function buildSystemPrompt() {
-        const out = getLangInfo(el.aiLangSelect.value).ja;
         return `
-          ・正確かつ自然な${out}に翻訳すること
-          ・承知しましたなどの前置きは絶対に入れないこと
+          ・あなたは会議の文字起こし補助AIです。
+          ・発話内容の意味を変えずに、誤認識や不自然な部分を文脈から補正し、読みやすい文章に整形します。
+          ・「承知しました」「了解しました」などの前置きや相づちは絶対に出力しないこと。
+          ・ユーザーが話していない内容を勝手に追加したり、過度に要約したりしないこと。
         `;
       }
 
       /**
-       * Realtimeセッション用のシステムプロンプト
+       * 文字起こし結果を整形するプロンプト
+       * @param {string} text
        * @returns {string}
        */
+      function buildCleanupPrompt(text) {
+        return [
+          "You are a transcription cleaner.",
+          "Clean up and slightly edit the following transcript so that it is natural and easy to read in the same language.",
+          "If there is repetition or filler, you may summarize and condense while keeping all key information and decisions.",
+          "Fix obvious recognition errors and unclear parts based on context without changing the original meaning.",
+          "Add appropriate punctuation and spacing.",
+          "Do not translate into another language.",
+          "Do not add explanations, meta comments, or acknowledgements such as '承知しました'.",
+          "",
+          "TRANSCRIPT:",
+          text,
+        ].join("\n");
+      }
+
       /**
        * 翻訳用プロンプトを生成する（翻訳文のみ出す）。
        * @param {object} params
@@ -1708,9 +1733,27 @@
         { resetRecording } = { resetRecording: true },
       ) {
         if (!state.micStream) {
-          state.micStream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
-          });
+          const enhancedConstraints = {
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+            },
+          };
+
+          try {
+            state.micStream =
+              await navigator.mediaDevices.getUserMedia(enhancedConstraints);
+          } catch (err) {
+            console.warn(
+              "Enhanced audio constraints failed, falling back to default.",
+              err,
+            );
+            state.micStream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+            });
+          }
         }
 
         // Recorder は「止まっている時だけ」開始（再接続では止めない）
@@ -1918,12 +1961,8 @@
               translateText(itemId, p.textContent);
             }
 
-            state.dc?.send(
-              JSON.stringify({
-                type: "response.create",
-                response: { modalities: ["text"] },
-              }),
-            );
+            // 文字起こしが増えたタイミングで、条件を満たせばAI要約を追加生成
+            updateConversationSummary();
 
             requestPersistHistorySnapshot();
             return;
@@ -2037,6 +2076,30 @@
       }
 
       /* =========================
+        AI Summary Timer
+      ========================= */
+      function startAiSummaryTimer() {
+        stopAiSummaryTimer();
+
+        const interval =
+          CONFIG.AI_SUMMARY_INTERVAL_MS && CONFIG.AI_SUMMARY_INTERVAL_MS > 0
+            ? CONFIG.AI_SUMMARY_INTERVAL_MS
+            : 60000;
+
+        state.aiSummaryTimerId = setInterval(() => {
+          if (!state.sessionRunning) return;
+          updateConversationSummary();
+        }, interval);
+      }
+
+      function stopAiSummaryTimer() {
+        if (state.aiSummaryTimerId) {
+          clearInterval(state.aiSummaryTimerId);
+          state.aiSummaryTimerId = null;
+        }
+      }
+
+      /* =========================
         Translate
       ========================= */
       /**
@@ -2115,6 +2178,208 @@
           data?.output?.[0]?.content?.[0]?.text ||
           "";
         return String(maybe || "").trim();
+      }
+
+      /* =========================
+        AI Cleanup (Transcript)
+      ========================= */
+      /**
+       * 文字起こしテキストを整形し、指定キーの要約としてAIカラムに表示する
+       * @param {string} key
+       * @param {string} text
+       */
+      async function cleanupTranscriptText(key, text) {
+        try {
+          const cleaned = await cleanupTranscriptWithOpenAI(text);
+          if (!cleaned) return;
+
+          let p = store.ai.get(key);
+          if (!p) {
+            p = createMessageParagraph("ai");
+            el.aiContainer.appendChild(p);
+            store.ai.set(key, p);
+          }
+
+          p.textContent = cleaned;
+          scrollToBottom(el.aiContainer);
+        } catch (err) {
+          console.error(err);
+        }
+      }
+
+      /**
+       * OpenAI API による文字起こし整形
+       * @param {string} text
+       * @returns {Promise<string>}
+       */
+      async function cleanupTranscriptWithOpenAI(text) {
+        const prompt = buildCleanupPrompt(text);
+
+        const res = await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${getApiKeyOrThrow()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
+            input: prompt,
+            temperature: 0,
+          }),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          throw new Error(`OpenAI cleanup error: ${res.status} ${errText}`);
+        }
+
+        const data = await res.json();
+        if (typeof data.output_text === "string" && data.output_text.trim()) {
+          return data.output_text.trim();
+        }
+
+        const maybe =
+          data?.output?.[0]?.content
+            ?.map((c) => c?.text)
+            .filter(Boolean)
+            .join("") ||
+          data?.output?.[0]?.content?.[0]?.text ||
+          "";
+
+        return String(maybe || "").trim();
+      }
+
+      /**
+       * 文字起こしの「新しく増えた部分」を、前後文脈を踏まえて要約・整形し、AI欄に追加表示する
+       * @param {{ fullTranscript: string, newSegment: string }} params
+       */
+      async function appendIncrementalSummary({ fullTranscript, newSegment }) {
+        try {
+          const cleaned = await incrementalCleanupWithOpenAI({
+            fullTranscript,
+            newSegment,
+          });
+          if (!cleaned) return;
+
+          const p = createMessageParagraph("ai");
+          el.aiContainer.appendChild(p);
+          p.textContent = cleaned;
+          scrollToBottom(el.aiContainer);
+        } catch (err) {
+          console.error(err);
+        }
+      }
+
+      /**
+       * 増分要約用プロンプトを構築
+       * - FULL_TRANSCRIPT を前後文脈として与えつつ、NEW_SEGMENT だけを整形対象とする
+       */
+      function buildIncrementalCleanupPrompt({ fullTranscript, newSegment }) {
+        return [
+          "You are a transcription cleaner for meeting notes.",
+          "You receive the full transcript so far and a newly added segment.",
+          "Use the FULL_TRANSCRIPT only as context.",
+          "Only clean up and rewrite the NEW_SEGMENT in the same language as the input.",
+          "Preserve the original meaning, decisions, and important details.",
+          "Fix obvious recognition errors and unclear parts based on context.",
+          "Add appropriate punctuation and line breaks.",
+          "Do not translate into another language.",
+          "Do not output acknowledgements such as '承知しました' or any meta commentary.",
+          "Output only the cleaned NEW_SEGMENT.",
+          "",
+          "FULL_TRANSCRIPT:",
+          fullTranscript,
+          "",
+          "NEW_SEGMENT:",
+          newSegment,
+        ].join("\n");
+      }
+
+      /**
+       * OpenAI API による増分整形
+       */
+      async function incrementalCleanupWithOpenAI({
+        fullTranscript,
+        newSegment,
+      }) {
+        const prompt = buildIncrementalCleanupPrompt({
+          fullTranscript,
+          newSegment,
+        });
+
+        const res = await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${getApiKeyOrThrow()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
+            input: prompt,
+            temperature: 0,
+          }),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          throw new Error(
+            `OpenAI incremental cleanup error: ${res.status} ${errText}`,
+          );
+        }
+
+        const data = await res.json();
+        if (typeof data.output_text === "string" && data.output_text.trim()) {
+          return data.output_text.trim();
+        }
+
+        const maybe =
+          data?.output?.[0]?.content
+            ?.map((c) => c?.text)
+            .filter(Boolean)
+            .join("") ||
+          data?.output?.[0]?.content?.[0]?.text ||
+          "";
+
+        return String(maybe || "").trim();
+      }
+
+      /**
+       * 会話全体の要約を「文字数ベース」で順次追加する
+       * - 一定以上、文字起こしが増えたときだけ新しい要約を生成
+       * - 既存のAI回答は上書きせず、新規<p>としてどんどん追加していく
+       */
+      async function updateConversationSummary() {
+        try {
+          const transcript = getParagraphsTextWithoutComments(
+            el.transcriptContainer,
+          );
+          const trimmed = transcript.trim();
+          if (!trimmed) return;
+
+          const totalLength = trimmed.length;
+          const lastLength = state.aiSummaryLastProcessedLength || 0;
+          const chunkSize =
+            CONFIG.AI_SUMMARY_CHUNK_CHARS && CONFIG.AI_SUMMARY_CHUNK_CHARS > 0
+              ? CONFIG.AI_SUMMARY_CHUNK_CHARS
+              : 800;
+
+          // まだ十分な長さになっていない最初のフェーズはスキップ
+          if (lastLength === 0 && totalLength < chunkSize) return;
+
+          // 2回目以降：前回からの増分がしきい値未満ならスキップ
+          if (lastLength > 0 && totalLength - lastLength < chunkSize) return;
+
+          const newSegment = trimmed.slice(lastLength);
+
+          await appendIncrementalSummary({
+            fullTranscript: trimmed,
+            newSegment,
+          });
+
+          state.aiSummaryLastProcessedLength = totalLength;
+        } catch (err) {
+          console.error(err);
+        }
       }
 
       /* =========================
@@ -2726,8 +2991,3 @@
     </script>
   </body>
 </html>
-
-
-
-
-
