@@ -293,6 +293,7 @@
         height: var(--control-h);
         box-sizing: border-box;
         padding: 0 26px 0 10px;
+        width: 120px;
         font-size: var(--control-font);
         line-height: 1.4;
         color: #111;
@@ -726,7 +727,7 @@
               class="fa-solid fa-microphone-lines panelTitle__icon"
               aria-hidden="true"
             ></i>
-            文字起こし
+            発言
             <span class="panelTitle__actions">
               <select
                 id="transcriptLang"
@@ -741,7 +742,7 @@
               class="btn btn--icon chatBox__copy"
               data-action="copy"
               data-target="transcriptContainer"
-              aria-label="文字起こしをコピー"
+              aria-label="発言をコピー"
               title="コピー"
             >
               <i class="fa-regular fa-copy" aria-hidden="true"></i>
@@ -784,7 +785,7 @@
               class="fa-solid fa-robot panelTitle__icon"
               aria-hidden="true"
             ></i>
-            AI回答
+            要約
             <span class="panelTitle__actions">
               <select
                 id="aiLang"
@@ -799,7 +800,7 @@
               class="btn btn--icon chatBox__copy"
               data-action="copy"
               data-target="aiContainer"
-              aria-label="AI回答をコピー"
+              aria-label="要約をコピー"
               title="コピー"
             >
               <i class="fa-regular fa-copy" aria-hidden="true"></i>
@@ -1011,7 +1012,6 @@
         REPORT_MODEL: "gpt-5.2",
         TRANSLATE_MODEL: "gpt-4.1-nano",
         AI_CLEAN_MODEL: "gpt-4.1-mini",
-        // AI要約: 時間ではなく文字数ベースで区切る
         AI_SUMMARY_CHUNK_CHARS: 100,
         MAX_SESSION_MS: 6 * 60 * 60 * 1000, // 6時間
         HISTORY_MAX: 10,
@@ -1038,7 +1038,6 @@
         historyCurrentId: null,
         historySaveTimerId: null,
         // AI要約関連
-        aiSummaryTimerId: null, // 将来の拡張用（現仕様では未使用）
         aiSummaryLastProcessedLength: 0,
       };
 
@@ -1056,16 +1055,16 @@
         en: { ja: "英語", en: "English" },
         zh: { ja: "中国語", en: "Chinese" },
         ko: { ja: "韓国語", en: "Korean" },
-        fr: { ja: "フランス語", en: "French" },
-        es: { ja: "スペイン語", en: "Spanish" },
-        de: { ja: "ドイツ語", en: "German" },
-        it: { ja: "イタリア語", en: "Italian" },
-        pt: { ja: "ポルトガル語", en: "Portuguese" },
-        ru: { ja: "ロシア語", en: "Russian" },
-        th: { ja: "タイ語", en: "Thai" },
-        vi: { ja: "ベトナム語", en: "Vietnamese" },
-        id: { ja: "インドネシア語", en: "Indonesian" },
-        hi: { ja: "ヒンディー語", en: "Hindi" },
+        fr: { ja: "ﾌﾗﾝｽ語", en: "French" },
+        es: { ja: "ｽﾍﾟｲﾝ語", en: "Spanish" },
+        de: { ja: "ﾄﾞｲﾂ語", en: "German" },
+        it: { ja: "ｲﾀﾘｱ語", en: "Italian" },
+        pt: { ja: "ﾎﾟﾙﾄｶﾞﾙ語", en: "Portuguese" },
+        ru: { ja: "ﾛｼｱ語", en: "Russian" },
+        th: { ja: "ﾀｲ語", en: "Thai" },
+        vi: { ja: "ﾍﾞﾄﾅﾑ語", en: "Vietnamese" },
+        id: { ja: "ｲﾝﾄﾞﾈｼｱ語", en: "Indonesian" },
+        hi: { ja: "ﾋﾝﾃﾞｨｰ語", en: "Hindi" },
       };
 
       /**
@@ -1548,18 +1547,60 @@
        * @returns {string}
        */
       function buildCleanupPrompt(text) {
+        const targetInfo = getLangInfo(el.aiLangSelect?.value || "ja");
+        const targetLangEn = targetInfo.en;
         return [
           "You are a transcription cleaner.",
-          "Clean up and slightly edit the following transcript so that it is natural and easy to read in the same language.",
+          `Clean up and slightly edit the following transcript so that it is natural and easy to read in ${targetLangEn}.`,
           "If there is repetition or filler, you may summarize and condense while keeping all key information and decisions.",
           "Fix obvious recognition errors and unclear parts based on context without changing the original meaning.",
           "Add appropriate punctuation and spacing.",
-          "Do not translate into another language.",
+          `Always output in ${targetLangEn}, regardless of the source language.`,
           "Do not add explanations, meta comments, or acknowledgements such as '承知しました'.",
           "",
           "TRANSCRIPT:",
           text,
         ].join("\n");
+      }
+
+      /**
+       * AI出力から「あいさつ・了承だけ」の文をできるだけ取り除く
+       * （完全には防げないが、先頭の定型句を削ることで「承知しました」だけの応答を抑制）
+       * @param {string} text
+       * @returns {string}
+       */
+      function sanitizeAiOutput(text) {
+        if (!text) return text;
+        let t = text.trimStart();
+        const prefixes = [
+          "承知しました。",
+          "承知しました、",
+          "承知しました",
+          "了解しました。",
+          "了解しました、",
+          "了解しました",
+          "かしこまりました。",
+          "かしこまりました、",
+          "かしこまりました",
+          "了解です。",
+          "了解です、",
+          "了解です",
+          "わかりました。",
+          "わかりました、",
+          "わかりました",
+        ];
+
+        let changed = false;
+        for (const p of prefixes) {
+          if (t.startsWith(p)) {
+            t = t.slice(p.length).trimStart();
+            changed = true;
+          }
+        }
+
+        // すべてが定型句だけだった場合は空文字にする（呼び出し側で無視される）
+        if (changed && !t) return "";
+        return changed ? t : text;
       }
 
       /**
@@ -1968,33 +2009,13 @@
             return;
           }
 
-          case "conversation.item.created": {
-            if (msg.item?.id) {
-              const p = createMessageParagraph("ai");
-              store.ai.set(msg.item.id, p);
-            }
-            return;
-          }
-
-          case "response.output_item.added": {
-            const id = msg.item?.id;
-            if (id) {
-              const p = createMessageParagraph("ai");
-              store.ai.set(id, p);
-            }
-            return;
-          }
-
+          // 以下の event は「音声に対するモデル応答」だが、
+          // 本アプリでは独自の要約ロジックのみを使うため、UIには一切反映しない。
+          case "conversation.item.created":
+          case "response.output_item.added":
           case "response.text.delta":
-          case "response.output_text.delta": {
-            const p = store.ai.get(msg.item_id);
-            if (!p || !msg.delta) return;
-
-            if (!p.parentNode) el.aiContainer.appendChild(p);
-            p.textContent += msg.delta;
-            scrollToBottom(el.aiContainer);
+          case "response.output_text.delta":
             return;
-          }
 
           default:
             return;
@@ -2072,30 +2093,6 @@
         if (state.autoSilenceTimerId) {
           clearInterval(state.autoSilenceTimerId);
           state.autoSilenceTimerId = null;
-        }
-      }
-
-      /* =========================
-        AI Summary Timer
-      ========================= */
-      function startAiSummaryTimer() {
-        stopAiSummaryTimer();
-
-        const interval =
-          CONFIG.AI_SUMMARY_INTERVAL_MS && CONFIG.AI_SUMMARY_INTERVAL_MS > 0
-            ? CONFIG.AI_SUMMARY_INTERVAL_MS
-            : 60000;
-
-        state.aiSummaryTimerId = setInterval(() => {
-          if (!state.sessionRunning) return;
-          updateConversationSummary();
-        }, interval);
-      }
-
-      function stopAiSummaryTimer() {
-        if (state.aiSummaryTimerId) {
-          clearInterval(state.aiSummaryTimerId);
-          state.aiSummaryTimerId = null;
         }
       }
 
@@ -2184,23 +2181,34 @@
         AI Cleanup (Transcript)
       ========================= */
       /**
-       * 文字起こしテキストを整形し、指定キーの要約としてAIカラムに表示する
-       * @param {string} key
-       * @param {string} text
+       * 文字起こしテキストを整形し、AIカラムに「新しいバブル」として追記する
+       * - fullTranscript: これまでの全文（文脈として使用）
+       * - newSegment:     今回新たに増えた部分（この部分だけを整形して表示）
+       * @param {string} key  呼び出し元識別用（現在はUI的には未使用）
+       * @param {{ fullTranscript: string, newSegment: string }} payload
        */
-      async function cleanupTranscriptText(key, text) {
+      async function cleanupTranscriptText(key, payload) {
         try {
-          const cleaned = await cleanupTranscriptWithOpenAI(text);
-          if (!cleaned) return;
+          const fullTranscript = payload?.fullTranscript ?? "";
+          const newSegment = payload?.newSegment ?? "";
+          if (!newSegment.trim()) return;
 
-          let p = store.ai.get(key);
-          if (!p) {
-            p = createMessageParagraph("ai");
-            el.aiContainer.appendChild(p);
-            store.ai.set(key, p);
+          const cleaned = await incrementalCleanupWithOpenAI({
+            fullTranscript,
+            newSegment,
+          });
+          const sanitized = sanitizeAiOutput(cleaned);
+          if (!sanitized) return;
+
+          const p = createMessageParagraph("ai");
+          el.aiContainer.appendChild(p);
+          p.textContent = sanitized;
+
+          // 必要なら将来参照できるように map にも保持しておく
+          if (key) {
+            store.ai.set(key + "_" + Date.now(), p);
           }
 
-          p.textContent = cleaned;
           scrollToBottom(el.aiContainer);
         } catch (err) {
           console.error(err);
@@ -2250,40 +2258,21 @@
       }
 
       /**
-       * 文字起こしの「新しく増えた部分」を、前後文脈を踏まえて要約・整形し、AI欄に追加表示する
-       * @param {{ fullTranscript: string, newSegment: string }} params
-       */
-      async function appendIncrementalSummary({ fullTranscript, newSegment }) {
-        try {
-          const cleaned = await incrementalCleanupWithOpenAI({
-            fullTranscript,
-            newSegment,
-          });
-          if (!cleaned) return;
-
-          const p = createMessageParagraph("ai");
-          el.aiContainer.appendChild(p);
-          p.textContent = cleaned;
-          scrollToBottom(el.aiContainer);
-        } catch (err) {
-          console.error(err);
-        }
-      }
-
-      /**
        * 増分要約用プロンプトを構築
        * - FULL_TRANSCRIPT を前後文脈として与えつつ、NEW_SEGMENT だけを整形対象とする
        */
       function buildIncrementalCleanupPrompt({ fullTranscript, newSegment }) {
+        const targetInfo = getLangInfo(el.aiLangSelect?.value || "ja");
+        const targetLangEn = targetInfo.en;
         return [
           "You are a transcription cleaner for meeting notes.",
           "You receive the full transcript so far and a newly added segment.",
           "Use the FULL_TRANSCRIPT only as context.",
-          "Only clean up and rewrite the NEW_SEGMENT in the same language as the input.",
+          `Only clean up and rewrite the NEW_SEGMENT in ${targetLangEn}.`,
           "Preserve the original meaning, decisions, and important details.",
           "Fix obvious recognition errors and unclear parts based on context.",
           "Add appropriate punctuation and line breaks.",
-          "Do not translate into another language.",
+          `Always output in ${targetLangEn}, regardless of the source language.`,
           "Do not output acknowledgements such as '承知しました' or any meta commentary.",
           "Output only the cleaned NEW_SEGMENT.",
           "",
@@ -2345,8 +2334,8 @@
 
       /**
        * 会話全体の要約を「文字数ベース」で順次追加する
-       * - 一定以上、文字起こしが増えたときだけ新しい要約を生成
-       * - 既存のAI回答は上書きせず、新規<p>としてどんどん追加していく
+       * - 一定以上、文字起こしが増えたときだけ新しいAIバブルを追加
+       * - AI欄には、過去の要約もバブルとして残していく
        */
       async function updateConversationSummary() {
         try {
@@ -2361,7 +2350,7 @@
           const chunkSize =
             CONFIG.AI_SUMMARY_CHUNK_CHARS && CONFIG.AI_SUMMARY_CHUNK_CHARS > 0
               ? CONFIG.AI_SUMMARY_CHUNK_CHARS
-              : 800;
+              : 400;
 
           // まだ十分な長さになっていない最初のフェーズはスキップ
           if (lastLength === 0 && totalLength < chunkSize) return;
@@ -2369,9 +2358,9 @@
           // 2回目以降：前回からの増分がしきい値未満ならスキップ
           if (lastLength > 0 && totalLength - lastLength < chunkSize) return;
 
+          // しきい値を満たしたら、増分だけを対象に新しいサマリバブルを追加
           const newSegment = trimmed.slice(lastLength);
-
-          await appendIncrementalSummary({
+          await cleanupTranscriptText("summary_incremental", {
             fullTranscript: trimmed,
             newSegment,
           });
