@@ -1006,13 +1006,14 @@
        * アプリの設定値
        */
       const CONFIG = {
-        WEBRTC_URL:
-          "https://api.openai.com/v1/realtime?model=gpt-realtime-1.5",
+        WEBRTC_URL: "https://api.openai.com/v1/realtime?model=gpt-realtime-1.5",
         TRANSCRIBE_MODEL: "gpt-4o-transcribe",
-        REPORT_MODEL: "gpt-5.2",
+        REPORT_MODEL: "gpt-5.4-mini",
         TRANSLATE_MODEL: "gpt-4.1-nano",
         AI_CLEAN_MODEL: "gpt-4.1-mini",
         AI_SUMMARY_CHUNK_CHARS: 100,
+        AUTO_SILENCE_INTERVAL_MS: 3000,
+        AUTO_SILENCE_CUT_MS: 250,
         MAX_SESSION_MS: 6 * 60 * 60 * 1000, // 6時間
         HISTORY_MAX: 10,
       };
@@ -1222,7 +1223,7 @@
 
       /**
        * chatBox内のメッセージ要素（<p>）を生成する
-       * @param {"user"|"google"|"ai"|"memo"} variant
+       * @param {"user"|"translate"|"ai"|"memo"} variant
        * @param {string} initialText
        * @returns {HTMLParagraphElement}
        */
@@ -1269,6 +1270,62 @@
           .map((p) => p.innerText)
           .join("\n")
           .trim();
+      }
+
+      /**
+       * 文字起こしに「日本語として扱う文字」（かな・漢字・半角カナ）が含まれるか
+       * @param {string} text
+       */
+      function hasJapaneseScriptInTranscript(text) {
+        return /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uFF66-\uFF9F]/.test(
+          text || "",
+        );
+      }
+
+      /**
+       * A–Z a–z 以外の拡張ラテン（ウムラウト等）を含むか。
+       * 英語だけ（ASCIIの字母・記号など）なら偽。
+       * @param {string} text
+       */
+      function hasExtendedLatinLettersBeyondAscii(text) {
+        const t = text || "";
+        try {
+          for (const ch of t) {
+            if (!/\p{Script=Latin}/u.test(ch)) continue;
+            if (!/^[A-Za-z]$/.test(ch)) return true;
+          }
+          return false;
+        } catch {
+          return /[\u00C0-\u024F\u1E00-\u1EFF]/.test(t);
+        }
+      }
+
+      /**
+       * 発言が日本語のとき、ロシア語・韓国語・アラビア語系・拡張ラテン（ウムラウト）など
+       * のみの文字起こしなら真（表示から除外する）。ASCII中心の英語は除外しない。
+       * @param {string} text
+       */
+      function isClearlyNonJapaneseScriptOnlyTranscript(text) {
+        const t = (text || "").trim();
+        if (!t) return false;
+        if (hasJapaneseScriptInTranscript(t)) return false;
+        if (/[\uAC00-\uD7A3]/.test(t)) return true;
+        if (/[\u0400-\u04FF]/.test(t)) return true;
+        if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(t)) return true;
+        if (/[\u0E00-\u0E7F]/.test(t)) return true;
+        if (/[\u0900-\u097F]/.test(t)) return true;
+        if (hasExtendedLatinLettersBeyondAscii(t)) return true;
+        return false;
+      }
+
+      /**
+       * 文字起こし用の段落をDOMから外し、store から除去する
+       * @param {string} itemId
+       */
+      function removeUserSpeechParagraph(itemId) {
+        const p = store.userSpeech.get(itemId);
+        if (p?.parentNode) p.remove();
+        store.userSpeech.delete(itemId);
       }
 
       /**
@@ -1776,9 +1833,6 @@
         if (!state.micStream) {
           const enhancedConstraints = {
             audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
               channelCount: 1,
             },
           };
@@ -1991,9 +2045,23 @@
           case "conversation.item.input_audio_transcription.completed": {
             const itemId = msg.item_id;
             const p = store.userSpeech.get(itemId);
+            const sourceLang = el.transcriptLangSelect?.value || "auto";
 
             const finalText =
               msg.transcript ?? msg.text ?? msg?.content?.[0]?.text;
+            const textStr = typeof finalText === "string" ? finalText : "";
+
+            if (
+              sourceLang === "ja" &&
+              textStr.trim() &&
+              isClearlyNonJapaneseScriptOnlyTranscript(textStr)
+            ) {
+              if (p) removeUserSpeechParagraph(itemId);
+              updateConversationSummary();
+              requestPersistHistorySnapshot();
+              return;
+            }
+
             if (p && typeof finalText === "string" && finalText.trim()) {
               p.textContent = finalText;
             }
@@ -2083,6 +2151,11 @@
       function startAutoSilence({ intervalMs = 10000, cutMs = 250 } = {}) {
         stopAutoSilence();
 
+        // ON直後に効いていることが分かるよう、まず1回だけ即時で無音を挿入する
+        if (state.sessionRunning) {
+          forceSilenceCut(cutMs);
+        }
+
         state.autoSilenceTimerId = setInterval(() => {
           if (!state.sessionRunning) return;
           forceSilenceCut(cutMs);
@@ -2137,36 +2210,17 @@
       }
 
       /**
-       * OpenAI API 翻訳実行
-       * @param {string} text テキスト
-       * @param {string} sourceLang 元の言語
-       * @param {string} targetLang 翻訳先
+       * OpenAI Responsesのレスポンスから「テキスト部分」だけ抽出します。
+       * - `output_text` があればそれを優先
+       * - なければ `output[0].content` を連結（fallback含む）
+       * @param {any} data
+       * @returns {string}
        */
-      async function translateWithOpenAI({ text, sourceLang, targetLang }) {
-        const prompt = buildTranslatePrompt({ text, sourceLang, targetLang });
-
-        const res = await fetch("https://api.openai.com/v1/responses", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${getApiKeyOrThrow()}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: CONFIG.TRANSLATE_MODEL,
-            input: prompt,
-            temperature: 0,
-          }),
-        });
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => "");
-          throw new Error(`OpenAI translate error: ${res.status} ${errText}`);
-        }
-
-        const data = await res.json();
-        if (typeof data.output_text === "string" && data.output_text.trim()) {
+      function extractOpenAIResponseText(data) {
+        if (typeof data?.output_text === "string" && data.output_text.trim()) {
           return data.output_text.trim();
         }
+
         const maybe =
           data?.output?.[0]?.content
             ?.map((c) => c?.text)
@@ -2174,7 +2228,61 @@
             .join("") ||
           data?.output?.[0]?.content?.[0]?.text ||
           "";
+
         return String(maybe || "").trim();
+      }
+
+      /**
+       * OpenAI Responses API呼び出し（テキストのみ返す）
+       * @param {{ model: string, input: string, temperature?: number, errorLabel: string }} params
+       * @returns {Promise<string>}
+       */
+      async function callOpenAIResponses({
+        model,
+        input,
+        temperature,
+        errorLabel,
+      }) {
+        const body = {
+          model,
+          input,
+        };
+
+        // 0は有効な値なので、`if (temperature)`ではなく型で判定する
+        if (typeof temperature === "number") body.temperature = temperature;
+
+        const res = await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${getApiKeyOrThrow()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          throw new Error(`${errorLabel}: ${res.status} ${errText}`);
+        }
+
+        const data = await res.json();
+        return extractOpenAIResponseText(data);
+      }
+
+      /**
+       * OpenAI API 翻訳実行
+       * @param {string} text テキスト
+       * @param {string} sourceLang 元の言語
+       * @param {string} targetLang 翻訳先
+       */
+      async function translateWithOpenAI({ text, sourceLang, targetLang }) {
+        const prompt = buildTranslatePrompt({ text, sourceLang, targetLang });
+        return callOpenAIResponses({
+          model: CONFIG.TRANSLATE_MODEL,
+          input: prompt,
+          temperature: 0,
+          errorLabel: "OpenAI translate error",
+        });
       }
 
       /* =========================
@@ -2222,39 +2330,12 @@
        */
       async function cleanupTranscriptWithOpenAI(text) {
         const prompt = buildCleanupPrompt(text);
-
-        const res = await fetch("https://api.openai.com/v1/responses", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${getApiKeyOrThrow()}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
-            input: prompt,
-            temperature: 0,
-          }),
+        return callOpenAIResponses({
+          model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
+          input: prompt,
+          temperature: 0,
+          errorLabel: "OpenAI cleanup error",
         });
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => "");
-          throw new Error(`OpenAI cleanup error: ${res.status} ${errText}`);
-        }
-
-        const data = await res.json();
-        if (typeof data.output_text === "string" && data.output_text.trim()) {
-          return data.output_text.trim();
-        }
-
-        const maybe =
-          data?.output?.[0]?.content
-            ?.map((c) => c?.text)
-            .filter(Boolean)
-            .join("") ||
-          data?.output?.[0]?.content?.[0]?.text ||
-          "";
-
-        return String(maybe || "").trim();
       }
 
       /**
@@ -2295,41 +2376,12 @@
           fullTranscript,
           newSegment,
         });
-
-        const res = await fetch("https://api.openai.com/v1/responses", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${getApiKeyOrThrow()}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
-            input: prompt,
-            temperature: 0,
-          }),
+        return callOpenAIResponses({
+          model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
+          input: prompt,
+          temperature: 0,
+          errorLabel: "OpenAI incremental cleanup error",
         });
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => "");
-          throw new Error(
-            `OpenAI incremental cleanup error: ${res.status} ${errText}`,
-          );
-        }
-
-        const data = await res.json();
-        if (typeof data.output_text === "string" && data.output_text.trim()) {
-          return data.output_text.trim();
-        }
-
-        const maybe =
-          data?.output?.[0]?.content
-            ?.map((c) => c?.text)
-            .filter(Boolean)
-            .join("") ||
-          data?.output?.[0]?.content?.[0]?.text ||
-          "";
-
-        return String(maybe || "").trim();
       }
 
       /**
@@ -2388,7 +2440,6 @@
         el.generateReportBtn.disabled = true;
         try {
           const transcriptRaw = getParagraphsText(el.transcriptContainer);
-          const aiRaw = getParagraphsText(el.aiContainer);
           const prompt = buildReportPrompt(transcriptRaw);
 
           el.reportDownloadLink.classList.add("is-hidden");
@@ -2444,37 +2495,11 @@
        * @param {string} prompt
        */
       async function generateTextWithOpenAI(prompt) {
-        const res = await fetch("https://api.openai.com/v1/responses", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${getApiKeyOrThrow()}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: CONFIG.REPORT_MODEL || "gpt-4.1-mini",
-            input: prompt,
-          }),
+        return callOpenAIResponses({
+          model: CONFIG.REPORT_MODEL || "gpt-4.1-mini",
+          input: prompt,
+          errorLabel: "OpenAI API error",
         });
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => "");
-          throw new Error(`OpenAI API error: ${res.status} ${errText}`);
-        }
-
-        const data = await res.json();
-        if (typeof data.output_text === "string" && data.output_text.trim()) {
-          return data.output_text.trim();
-        }
-
-        const maybe =
-          data?.output?.[0]?.content
-            ?.map((c) => c?.text)
-            .filter(Boolean)
-            .join("") ||
-          data?.output?.[0]?.content?.[0]?.text ||
-          "";
-
-        return String(maybe || "").trim();
       }
 
       /**
@@ -2554,7 +2579,10 @@
           updateSessionToggleUI(true);
           updateRealtimeButtons();
           startSessionLimitTimer();
-          startAutoSilence({ intervalMs: 10000, cutMs: 250 });
+          startAutoSilence({
+            intervalMs: CONFIG.AUTO_SILENCE_INTERVAL_MS,
+            cutMs: CONFIG.AUTO_SILENCE_CUT_MS,
+          });
         } else {
           stopSession();
           requestPersistHistorySnapshot({ debounceMs: 0 });
