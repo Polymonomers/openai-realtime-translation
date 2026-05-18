@@ -1006,15 +1006,17 @@
        * アプリの設定値
        */
       const CONFIG = {
-        WEBRTC_URL: "https://api.openai.com/v1/realtime?model=gpt-realtime-mini",
+        TRANSCRIBE_URL: "https://api.openai.com/v1/audio/transcriptions",
         TRANSCRIBE_MODEL: "gpt-4o-transcribe",
         REPORT_MODEL: "gpt-5.4-mini",
         TRANSLATE_MODEL: "gpt-4.1-nano",
         AI_CLEAN_MODEL: "gpt-4.1-mini",
         AI_SUMMARY_CHUNK_CHARS: 100,
-        AUTO_SILENCE_INTERVAL_MS: 3000,
-        AUTO_SILENCE_CUT_MS: 250,
-        MAX_SESSION_MS: 6 * 60 * 60 * 1000, // 6時間
+        VAD_SILENCE_MS: 1200,    // 無音がこの時間続いたら発話終了と判定
+        VAD_THRESHOLD: 0.003,    // 無音判定の音量しきい値(RMS)
+        MAX_CHUNK_MS: 10000,     // 最大チャンク長(ms) — これを超えたら強制送信
+        MIN_CHUNK_MS: 300,       // この長さ未満のチャンクは送信しない
+        MAX_SESSION_MS: 6 * 60 * 60 * 1000,
         HISTORY_MAX: 10,
       };
 
@@ -1022,24 +1024,29 @@
        * セッション状態（WebRTC/Recorderなどの実体）をまとめて保持する。
        */
       const state = {
-        pc: null,
-        dc: null,
+        // マイク / 録音
         micStream: null,
-        mediaRecorder: null,
+        audioContext: null,
+        analyserNode: null,
+        scriptProcessor: null,
+        mediaRecorder: null,       // 全体録音（音声DL用）
         recordedChunks: [],
+        // チャンク録音（文字起こし送信用）
+        chunkRecorder: null,
+        chunkStartedAt: 0,
+        chunkMaxTimerId: null,     // 最大10秒タイマー
+        silenceTimerId: null,      // 無音タイマー
+        isSpeaking: false,
+        // セッション
         sessionRunning: false,
-        realtimeConnected: false,
-        reconnecting: false,
         sessionStartedAt: 0,
         sessionLimitTimerId: null,
-        reconnectAttempt: 0,
-        reconnectTimerId: null,
-        disconnectedTimerId: null,
-        autoSilenceTimerId: null,
         historyCurrentId: null,
         historySaveTimerId: null,
         // AI要約関連
         aiSummaryLastProcessedLength: 0,
+        // VAD制御
+        _vadRunning: false,
       };
 
       /* =========================
@@ -1345,18 +1352,21 @@
       }
 
       /**
-       * 強制ミュート
-       * @param {number} ms ミリ秒
+       * 強制フラッシュ（VAD方式: 現在のチャンクを即時送信して新チャンク開始）
        */
-      function forceSilenceCut(ms = 900) {
-        if (!state.micStream) return;
-        const track = state.micStream.getAudioTracks()?.[0];
-        if (!track) return;
+      function forceSilenceCut() {
+        if (!state.sessionRunning || !state.micStream) return;
 
-        track.enabled = false;
+        flushChunkRecorder();
+
+        // stop() の onstop 処理が走る前に次の recorder を開始すると、
+        // state.chunkStartedAt が上書きされて古いチャンクが破棄されるため、
+        // 次の録音開始はイベントループを1回待ってから行う。
         setTimeout(() => {
-          track.enabled = true;
-        }, ms);
+          if (state.sessionRunning && state.micStream) {
+            startChunkRecorder(state.micStream);
+          }
+        }, 0);
       }
 
       /**
@@ -1586,19 +1596,6 @@
         Prompt
       ========================= */
       /**
-       * Realtimeセッション用のシステムプロンプト
-       * @returns {string}
-       */
-      function buildSystemPrompt() {
-        return `
-          ・あなたは会議の文字起こし補助AIです。
-          ・発話内容の意味を変えずに、誤認識や不自然な部分を文脈から補正し、読みやすい文章に整形します。
-          ・「承知しました」「了解しました」などの前置きや相づちは絶対に出力しないこと。
-          ・ユーザーが話していない内容を勝手に追加したり、過度に要約したりしないこと。
-        `;
-      }
-
-      /**
        * 文字起こし結果を整形するプロンプト
        * @param {string} text
        * @returns {string}
@@ -1699,473 +1696,272 @@
       }
 
       /* =========================
-        Session Control
+        Session Control (VAD + /v1/audio/transcriptions)
       ========================= */
+
       /**
-       * セッションを開始する
-       * - マイク取得
-       * - PeerConnection準備
-       * - Offer送信
+       * セッション開始: マイク取得 → VAD開始 → 全体録音開始
        */
       async function startSession() {
-        const micStream = await setupMicrophone({ resetRecording: true });
-        await setupPeerConnection(micStream);
-        await createAndSendOffer();
-        state.realtimeConnected = true;
-        updateRealtimeButtons();
+        // マイク取得
+        try {
+          state.micStream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, sampleRate: 16000 },
+          });
+        } catch {
+          state.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+
+        // 全体録音（音声DLリンク用）
+        state.recordedChunks = [];
+        state.mediaRecorder = new MediaRecorder(state.micStream);
+        state.mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) state.recordedChunks.push(e.data);
+        };
+        state.mediaRecorder.start();
+
+        // VAD開始
+        startVAD(state.micStream);
       }
 
       /**
-       * セッションを停止する
-       * - WebRTC接続を閉じる
-       * - 録音停止とダウンロードリンク生成を開始する
+       * セッション停止
        */
       function stopSession() {
         clearSessionLimitTimer();
-        closeRealtimeConnection();
-        stopRecordingAndPrepareDownloadLink();
+        stopVAD();
 
-        // マイクを完全停止したい場合
-        state.micStream?.getTracks()?.forEach((t) => t.stop());
+        // チャンク録音が動いていれば強制送信
+        flushChunkRecorder();
+
+        // 全体録音停止 → DLリンク生成
+        if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") {
+          state.mediaRecorder.stop();
+          state.mediaRecorder.onstop = () => {
+            if (state.recordedChunks.length === 0) return;
+            const blob = new Blob(state.recordedChunks, { type: "audio/webm" });
+            state.recordedChunks = [];
+            el.mediaDownloadLink.href = URL.createObjectURL(blob);
+            el.mediaDownloadLink.classList.remove("is-hidden");
+          };
+        }
+
+        state.micStream?.getTracks().forEach((t) => t.stop());
         state.micStream = null;
-
-        state.realtimeConnected = false;
-        updateRealtimeButtons();
       }
 
+      /* =========================
+        VAD (Web Audio API)
+      ========================= */
+
       /**
-       * セッション再接続
+       * Web Audio API で RMS を監視し、発話区切りを検出する
+       * 発話終了 or MAX_CHUNK_MS 経過 → flushChunkRecorder()
        */
-      async function reconnectSession() {
-        if (!state.sessionRunning) return;
-        if (state.reconnecting) return;
+      function startVAD(stream) {
+        state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = state.audioContext.createMediaStreamSource(stream);
 
-        state.reconnecting = true;
-        updateRealtimeButtons();
+        state.analyserNode = state.audioContext.createAnalyser();
+        state.analyserNode.fftSize = 512;
+        source.connect(state.analyserNode);
 
-        try {
-          closeRealtimeConnection(); // WebRTCだけ閉じる（Recorder/マイクは維持）
-          await setupPeerConnection(state.micStream);
-          await createAndSendOffer();
-          state.realtimeConnected = true;
-        } catch (err) {
-          console.error("Reconnect failed:", err);
-          state.realtimeConnected = false;
-          // 必要ならUIに表示したければ、メモ欄等へ出す処理を追加
-        } finally {
-          state.reconnecting = false;
-          updateRealtimeButtons();
+        const bufferLen = state.analyserNode.frequencyBinCount;
+        const dataArray = new Float32Array(bufferLen);
+
+        // チャンク録音を開始
+        startChunkRecorder(stream);
+
+        state._vadRunning = true;
+        console.log("[VAD] started");
+        function tick() {
+          if (!state._vadRunning) return;
+
+          state.analyserNode.getFloatTimeDomainData(dataArray);
+          let sum = 0;
+          for (let i = 0; i < bufferLen; i++) sum += dataArray[i] * dataArray[i];
+          const rms = Math.sqrt(sum / bufferLen);
+
+          const isSpeech = rms > CONFIG.VAD_THRESHOLD;
+          // 5秒ごとにRMSをログ出力（デバッグ用）
+          if (!tick._lastLog || Date.now() - tick._lastLog > 5000) {
+            tick._lastLog = Date.now();
+            console.log("[VAD] rms:", rms.toFixed(4), "isSpeech:", isSpeech);
+          }
+
+          if (isSpeech) {
+            // 発話中 → 無音タイマーをリセット
+            state.isSpeaking = true;
+            if (state.silenceTimerId) {
+              clearTimeout(state.silenceTimerId);
+              state.silenceTimerId = null;
+            }
+          } else {
+            // 無音 → タイマーが未設定なら開始
+            if (state.isSpeaking && !state.silenceTimerId) {
+              state.silenceTimerId = setTimeout(() => {
+                state.silenceTimerId = null;
+                state.isSpeaking = false;
+                // 発話終了 → チャンクを送信して新しいチャンク録音を開始
+                flushChunkRecorder();
+                setTimeout(() => {
+                  if (state.sessionRunning && state.micStream) {
+                    startChunkRecorder(stream);
+                  }
+                }, 0);
+              }, CONFIG.VAD_SILENCE_MS);
+            }
+          }
+
+          requestAnimationFrame(tick);
         }
+
+        requestAnimationFrame(tick);
       }
 
-      /**
-       * WebRTC関連（DataChannel/PeerConnection）を閉じる
-       */
-      function closeRealtimeConnection() {
-        try {
-          if (state.dc) {
-            state.dc.onopen = null;
-            state.dc.onclose = null;
-            state.dc.onmessage = null;
-            state.dc.onerror = null;
-            state.dc.close();
-          }
-        } catch {}
-
-        try {
-          if (state.pc) {
-            state.pc.oniceconnectionstatechange = null;
-            state.pc.onconnectionstatechange = null;
-            state.pc.onicecandidate = null;
-            state.pc.onicecandidateerror = null;
-            state.pc.close();
-          }
-        } catch {}
-
-        state.dc = null;
-        state.pc = null;
-
-        clearAutoReconnectTimers();
+      function stopVAD() {
+        state._vadRunning = false;
+        if (state.silenceTimerId) {
+          clearTimeout(state.silenceTimerId);
+          state.silenceTimerId = null;
+        }
+        if (state.chunkMaxTimerId) {
+          clearTimeout(state.chunkMaxTimerId);
+          state.chunkMaxTimerId = null;
+        }
+        try { state.analyserNode?.disconnect(); } catch {}
+        try { state.audioContext?.close(); } catch {}
+        state.audioContext = null;
+        state.analyserNode = null;
+        state.isSpeaking = false;
       }
 
+      /* =========================
+        Chunk Recorder
+      ========================= */
+
       /**
-       * 録音を停止し、停止後イベントでダウンロードリンクを更新・表示
+       * チャンク録音を開始し、MAX_CHUNK_MS 後に強制フラッシュ
        */
-      function stopRecordingAndPrepareDownloadLink() {
-        if (!state.mediaRecorder || state.mediaRecorder.state === "inactive")
+      function startChunkRecorder(stream) {
+        if (!stream) return;
+
+        // 既に録音中なら二重開始しない
+        if (state.chunkRecorder && state.chunkRecorder.state === "recording") {
           return;
-
-        state.mediaRecorder.stop();
-        state.mediaRecorder.onstop = () => {
-          const url = buildRecordedAudioObjectUrl();
-          if (!url) return;
-          showAudioDownloadLink(url);
-        };
-      }
-
-      /**
-       * recordedChunksからBlob URLを作成する
-       * @returns {string|null} 生成できない場合はnull
-       */
-      function buildRecordedAudioObjectUrl() {
-        if (state.recordedChunks.length === 0) return null;
-        const blob = new Blob(state.recordedChunks, { type: "audio/webm" });
-        state.recordedChunks = [];
-        return URL.createObjectURL(blob);
-      }
-
-      /**
-       * ダウンロードリンクにURLを設定
-       * @param {string} url
-       */
-      function showAudioDownloadLink(url) {
-        el.mediaDownloadLink.href = url;
-        el.mediaDownloadLink.classList.remove("is-hidden");
-      }
-
-      /**
-       * マイク入力を取得し、MediaRecorderを開始して録音データをstateに蓄積
-       * @returns {Promise<MediaStream>}
-       */
-      async function setupMicrophone(
-        { resetRecording } = { resetRecording: true },
-      ) {
-        if (!state.micStream) {
-          const enhancedConstraints = {
-            audio: {
-              channelCount: 1,
-            },
-          };
-
-          try {
-            state.micStream =
-              await navigator.mediaDevices.getUserMedia(enhancedConstraints);
-          } catch (err) {
-            console.warn(
-              "Enhanced audio constraints failed, falling back to default.",
-              err,
-            );
-            state.micStream = await navigator.mediaDevices.getUserMedia({
-              audio: true,
-            });
-          }
         }
 
-        // Recorder は「止まっている時だけ」開始（再接続では止めない）
-        if (!state.mediaRecorder || state.mediaRecorder.state === "inactive") {
-          if (resetRecording) state.recordedChunks = [];
-
-          state.mediaRecorder = new MediaRecorder(state.micStream);
-          state.mediaRecorder.ondataavailable = (e) => {
-            if (e.data.size > 0) state.recordedChunks.push(e.data);
-          };
-          state.mediaRecorder.start();
+        const chunks = [];
+        const startedAt = Date.now(); // この recorder 専用の開始時刻
+        let recorder;
+        try {
+          recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+        } catch {
+          recorder = new MediaRecorder(stream);
         }
 
-        return state.micStream;
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
+        };
+
+        recorder.onstop = () => {
+          const elapsed = Date.now() - startedAt;
+          if (elapsed < CONFIG.MIN_CHUNK_MS || chunks.length === 0) {
+            console.log("[chunk] skipped", { elapsed, chunks: chunks.length });
+            return;
+          }
+          const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+          console.log("[chunk] sending", blob.size, "bytes", blob.type);
+          sendChunkToTranscribeAPI(blob);
+        };
+
+        recorder.start();
+        state.chunkRecorder = recorder;
+        state.chunkStartedAt = startedAt;
+
+        // 最大チャンク長タイマー
+        state.chunkMaxTimerId = setTimeout(() => {
+          state.chunkMaxTimerId = null;
+          flushChunkRecorder();
+          setTimeout(() => {
+            if (state.sessionRunning && state.micStream) {
+              startChunkRecorder(stream);
+            }
+          }, 0);
+        }, CONFIG.MAX_CHUNK_MS);
       }
 
       /**
-       * PeerConnectionとDataChannelを作成し、受信イベントを登録
-       * @param {MediaStream} stream
+       * 現在のチャンク録音を停止して送信トリガー
        */
-      async function setupPeerConnection(stream) {
-        state.pc = new RTCPeerConnection();
-        stream.getTracks().forEach((track) => state.pc.addTrack(track, stream));
-
-        //// 音声再生したい時は以下を追加
-        // const audioEl = document.createElement("audio");
-        // audioEl.autoplay = true;
-        // document.body.appendChild(audioEl);
-
-        state.dc = state.pc.createDataChannel("oai-events");
-
-        state.dc.onopen = () => {
-          state.dc.send(
-            JSON.stringify({
-              type: "session.update",
-              session: {
-                modalities: ["text"], // 音声を作らせない（=再生不要）
-                instructions: buildSystemPrompt(),
-                input_audio_transcription: { model: CONFIG.TRANSCRIBE_MODEL },
-                turn_detection: {
-                  type: "server_vad",
-                  silence_duration_ms: 250,
-                  prefix_padding_ms: 200,
-                  // threshold: 0.6, // 大きいほど音声と判定しにくい(環境で調整)
-                },
-              },
-            }),
-          );
-        };
-
-        state.dc.onmessage = (e) =>
-          handleDataChannelMessage(JSON.parse(e.data));
-
-        state.dc.onclose = () => {
-          state.realtimeConnected = false;
-          updateRealtimeButtons();
-          scheduleAutoReconnect("dc.onclose", { immediate: true });
-        };
-
-        state.dc.onerror = () => {
-          state.realtimeConnected = false;
-          updateRealtimeButtons();
-          scheduleAutoReconnect("dc.onerror", { immediate: true });
-        };
-
-        state.pc.oniceconnectionstatechange = () => {
-          const s = state.pc?.iceConnectionState;
-          console.warn("[pc] iceConnectionState =", s);
-
-          if (s === "connected" || s === "completed") {
-            markConnected();
-            return;
-          }
-
-          if (s === "disconnected") {
-            if (!state.disconnectedTimerId) {
-              state.disconnectedTimerId = setTimeout(() => {
-                state.disconnectedTimerId = null;
-                const now = state.pc?.iceConnectionState;
-                if (now === "disconnected") {
-                  state.realtimeConnected = false;
-                  updateRealtimeButtons();
-                  scheduleAutoReconnect("ice.disconnected-timeout");
-                }
-              }, 7000);
-            }
-            return;
-          }
-
-          if (s === "failed") {
-            state.realtimeConnected = false;
-            updateRealtimeButtons();
-            scheduleAutoReconnect("ice.failed", { immediate: true });
-          }
-        };
-
-        state.pc.onconnectionstatechange = () => {
-          const s = state.pc?.connectionState;
-          console.warn("[pc] connectionState =", s);
-
-          if (s === "connected") {
-            markConnected();
-            return;
-          }
-
-          if (s === "disconnected") {
-            if (!state.disconnectedTimerId) {
-              state.disconnectedTimerId = setTimeout(() => {
-                state.disconnectedTimerId = null;
-                const now = state.pc?.connectionState;
-                if (now === "disconnected") {
-                  state.realtimeConnected = false;
-                  updateRealtimeButtons();
-                  scheduleAutoReconnect("pc.disconnected-timeout");
-                }
-              }, 7000);
-            }
-            return;
-          }
-
-          if (s === "failed") {
-            state.realtimeConnected = false;
-            updateRealtimeButtons();
-            scheduleAutoReconnect("pc.failed", { immediate: true });
-            return;
-          }
-
-          if (s === "closed") {
-            state.realtimeConnected = false;
-            updateRealtimeButtons();
-          }
-        };
-      }
-
-      /**
-       * Offerを作成してAPIに送信し、Answerを受け取って接続を確立
-       */
-      async function createAndSendOffer() {
-        const offer = await state.pc.createOffer();
-        await state.pc.setLocalDescription(offer);
-
-        const res = await fetch(CONFIG.WEBRTC_URL, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${getApiKeyOrThrow()}`,
-            "Content-Type": "application/sdp",
-          },
-          body: offer.sdp,
-        });
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => "");
-          state.realtimeConnected = false;
-          updateRealtimeButtons();
-          throw new Error(`Realtime offer error: ${res.status} ${errText}`);
+      function flushChunkRecorder() {
+        if (state.chunkMaxTimerId) {
+          clearTimeout(state.chunkMaxTimerId);
+          state.chunkMaxTimerId = null;
         }
-
-        await state.pc.setRemoteDescription({
-          type: "answer",
-          sdp: await res.text(),
-        });
-
-        state.realtimeConnected = true;
-        updateRealtimeButtons();
-      }
-
-      /* =========================
-        DataChannel Handling
-      ========================= */
-      /**
-       * Realtime APIのDataChannelメッセージを処理してUIに反映
-       * - 文字起こしのdelta追記
-       * - 文字起こし完了時に翻訳（任意）＆ response.create
-       * - AI出力のdelta追記
-       * @param {any} msg
-       */
-      function handleDataChannelMessage(msg) {
-        switch (msg.type) {
-          case "conversation.item.input_audio_transcription.delta": {
-            const itemId = msg.item_id;
-            let p = store.userSpeech.get(itemId);
-
-            if (!p) {
-              p = createMessageParagraph("user");
-              el.transcriptContainer.appendChild(p);
-              store.userSpeech.set(itemId, p);
-            }
-
-            p.textContent += msg.delta || "";
-            scrollToBottom(el.transcriptContainer);
-            return;
-          }
-
-          case "conversation.item.input_audio_transcription.completed": {
-            const itemId = msg.item_id;
-            const p = store.userSpeech.get(itemId);
-            const sourceLang = el.transcriptLangSelect?.value || "auto";
-
-            const finalText =
-              msg.transcript ?? msg.text ?? msg?.content?.[0]?.text;
-            const textStr = typeof finalText === "string" ? finalText : "";
-
-            if (
-              sourceLang === "ja" &&
-              textStr.trim() &&
-              isClearlyNonJapaneseScriptOnlyTranscript(textStr)
-            ) {
-              if (p) removeUserSpeechParagraph(itemId);
-              updateConversationSummary();
-              requestPersistHistorySnapshot();
-              return;
-            }
-
-            if (p && typeof finalText === "string" && finalText.trim()) {
-              p.textContent = finalText;
-            }
-
-            if (p && el.translateLangSelect.value !== "none") {
-              translateText(itemId, p.textContent);
-            }
-
-            // 文字起こしが増えたタイミングで、条件を満たせばAI要約を追加生成
-            updateConversationSummary();
-
-            requestPersistHistorySnapshot();
-            return;
-          }
-
-          // 以下の event は「音声に対するモデル応答」だが、
-          // 本アプリでは独自の要約ロジックのみを使うため、UIには一切反映しない。
-          case "conversation.item.created":
-          case "response.output_item.added":
-          case "response.text.delta":
-          case "response.output_text.delta":
-            return;
-
-          default:
-            return;
+        if (state.chunkRecorder && state.chunkRecorder.state === "recording") {
+          state.chunkRecorder.stop();
+          state.chunkRecorder = null;
         }
       }
 
       /* =========================
-        Reconnect Handler
+        Transcribe API
       ========================= */
-      function clearAutoReconnectTimers() {
-        if (state.reconnectTimerId) {
-          clearTimeout(state.reconnectTimerId);
-          state.reconnectTimerId = null;
-        }
-        if (state.disconnectedTimerId) {
-          clearTimeout(state.disconnectedTimerId);
-          state.disconnectedTimerId = null;
-        }
-      }
-
-      function markConnected() {
-        state.realtimeConnected = true;
-        state.reconnectAttempt = 0;
-        clearAutoReconnectTimers();
-        updateRealtimeButtons();
-      }
 
       /**
-       * 自動再接続を予約する
-       * @param {string} reason
-       * @param {{immediate?: boolean}} opts
+       * 音声チャンクを /v1/audio/transcriptions に送信し、結果をUIに反映
+       * @param {Blob} blob
        */
-      function scheduleAutoReconnect(reason, { immediate = false } = {}) {
-        if (!state.sessionRunning) return;
-        if (state.reconnecting) return;
-        if (state.reconnectTimerId) return;
+      async function sendChunkToTranscribeAPI(blob) {
+        try {
+          const sourceLang = el.transcriptLangSelect?.value || "auto";
+          const fd = new FormData();
+          fd.append("file", blob, "chunk.webm");
+          fd.append("model", CONFIG.TRANSCRIBE_MODEL);
+          if (sourceLang !== "auto") fd.append("language", sourceLang);
 
-        const attempt = state.reconnectAttempt;
-        const base = Math.min(30000, 1000 * Math.pow(2, attempt)); // 1s,2s,4s...最大30s
-        const jitter = Math.floor(Math.random() * 400); // 0-400ms ばらつき
-        const wait = immediate ? 0 : base + jitter;
+          const res = await fetch(CONFIG.TRANSCRIBE_URL, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${getApiKeyOrThrow()}` },
+            body: fd,
+          });
 
-        console.warn(
-          `[auto-reconnect] scheduled in ${wait}ms (attempt=${attempt}) reason=${reason}`,
-        );
-
-        state.reconnectTimerId = setTimeout(async () => {
-          state.reconnectTimerId = null;
-          if (!state.sessionRunning) return;
-
-          try {
-            state.reconnectAttempt++;
-            await reconnectSession();
-            markConnected();
-          } catch (e) {
-            console.error("[auto-reconnect] reconnect failed:", e);
-            scheduleAutoReconnect("retry-after-failure");
+          if (!res.ok) {
+            const err = await res.text().catch(() => "");
+            console.error("[transcribe] error", res.status, err);
+            return;
           }
-        }, wait);
-      }
 
-      /* =========================
-        SilenceHandler
-      ========================= */
-      function startAutoSilence({ intervalMs = 10000, cutMs = 250 } = {}) {
-        stopAutoSilence();
+          const data = await res.json();
+          const text = (data.text || "").trim();
+          console.log("[transcribe] result:", text);
+          if (!text) return;
 
-        // ON直後に効いていることが分かるよう、まず1回だけ即時で無音を挿入する
-        if (state.sessionRunning) {
-          forceSilenceCut(cutMs);
-        }
+          // 明らかに誤認識のノイズ文字列を除外
+          if (
+            sourceLang === "ja" &&
+            isClearlyNonJapaneseScriptOnlyTranscript(text)
+          ) return;
 
-        state.autoSilenceTimerId = setInterval(() => {
-          if (!state.sessionRunning) return;
-          forceSilenceCut(cutMs);
-        }, intervalMs);
-      }
+          // UIに追加
+          const itemId = "chunk_" + Date.now();
+          const p = createMessageParagraph("user", text);
+          el.transcriptContainer.appendChild(p);
+          store.userSpeech.set(itemId, p);
+          scrollToBottom(el.transcriptContainer);
 
-      function stopAutoSilence() {
-        if (state.autoSilenceTimerId) {
-          clearInterval(state.autoSilenceTimerId);
-          state.autoSilenceTimerId = null;
+          // 翻訳
+          if (el.translateLangSelect.value !== "none") {
+            translateText(itemId, text);
+          }
+
+          // AI要約
+          updateConversationSummary();
+          requestPersistHistorySnapshot();
+
+        } catch (err) {
+          console.error("[transcribe] fetch error", err);
         }
       }
 
@@ -2540,13 +2336,12 @@
       }
 
       /**
-       * 無音声ボタン
+       * ボタン状態更新
        */
       function updateRealtimeButtons() {
-        const enabled = state.sessionRunning; // セッション中は押せる
+        const enabled = state.sessionRunning;
         el.forceSilenceBtn.disabled = !enabled;
-        // 再接続は「切れている or 任意に押したい」想定でセッション中は有効
-        el.reconnectBtn.disabled = !enabled || state.reconnecting;
+        el.reconnectBtn.disabled = true; // VAD方式では再接続ボタン不要
       }
 
       /**
@@ -2573,25 +2368,32 @@
             openKeyModal();
             return;
           }
-          await startSession();
-          beginHistorySession();
+
+          // startSession() 内で VAD/チャンク録音が開始されるため、先に true にする
           state.sessionRunning = true;
-          updateSessionToggleUI(true);
-          updateRealtimeButtons();
-          startSessionLimitTimer();
-          startAutoSilence({
-            intervalMs: CONFIG.AUTO_SILENCE_INTERVAL_MS,
-            cutMs: CONFIG.AUTO_SILENCE_CUT_MS,
-          });
+
+          try {
+            await startSession();
+            beginHistorySession();
+            updateSessionToggleUI(true);
+            updateRealtimeButtons();
+            startSessionLimitTimer();
+          } catch (err) {
+            state.sessionRunning = false;
+            console.error(err);
+            alert("録音開始に失敗しました。\n" + (err?.message || String(err)));
+            updateSessionToggleUI(false);
+            updateRealtimeButtons();
+            updateApiKeyGateUI();
+          }
         } else {
+          state.sessionRunning = false; // VAD tick を止めるため先に false
           stopSession();
           requestPersistHistorySnapshot({ debounceMs: 0 });
-          state.sessionRunning = false;
           updateSessionToggleUI(false);
           updateRealtimeButtons();
           clearSessionLimitTimer();
           updateApiKeyGateUI();
-          stopAutoSilence();
         }
       }
 
@@ -2648,7 +2450,7 @@
             return;
 
           case "reconnect-session":
-            await reconnectSession();
+            // VAD方式では再接続不要
             return;
 
           case "open-settings":
