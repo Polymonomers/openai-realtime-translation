@@ -1843,7 +1843,7 @@
         const completed = [];
         let buf = text;
         // 全角：句点・感嘆符・疑問符は常に区切り
-        const JA_ENDERS = ["。", "．", "！", "？"];
+        const JA_ENDERS = ["。", "！", "？"];
         while (true) {
           let jaIdx = Infinity;
           for (const c of JA_ENDERS) {
