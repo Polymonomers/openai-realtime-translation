@@ -1776,8 +1776,10 @@
         ws.onerror = (e) => console.error("[RT] error", e);
         ws.onclose = (e) => {
           console.log("[RT] closed", e.code, e.reason);
-          stopPcmCapture();
-          state.rtWs = null;
+          if (state.rtWs === ws) {
+            stopPcmCapture();
+            state.rtWs = null;
+          }
         };
       }
 
