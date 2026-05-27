@@ -1749,7 +1749,7 @@
         ]);
         state.rtWs = ws;
 
-        ws.onopen = () => {
+        ws.onopen = async () => {
           console.log("[RT] connected");
           const lang = el.transcriptLangSelect?.value || "auto";
           ws.send(
@@ -1769,7 +1769,7 @@
               },
             }),
           );
-          startPcmCapture(stream);
+          await startPcmCapture(stream);
         };
 
         ws.onmessage = (e) => handleRealtimeEvent(JSON.parse(e.data));
@@ -1790,20 +1790,14 @@
         state.isSpeaking = false;
       }
 
-      function startPcmCapture(stream) {
+      async function startPcmCapture(stream) {
         state.rtAudioCtx = new AudioContext({
           sampleRate: CONFIG.RT_SAMPLE_RATE,
         });
         const source = state.rtAudioCtx.createMediaStreamSource(stream);
-        const processor = state.rtAudioCtx.createScriptProcessor(
-          CONFIG.RT_BUFFER_SIZE,
-          1,
-          1,
-        );
 
-        processor.onaudioprocess = (e) => {
+        function sendFloat32(float32) {
           if (!state.rtWs || state.rtWs.readyState !== WebSocket.OPEN) return;
-          const float32 = e.inputBuffer.getChannelData(0);
           const pcm16 = new Int16Array(float32.length);
           for (let i = 0; i < float32.length; i++) {
             const s = Math.max(-1, Math.min(1, float32[i]));
@@ -1820,7 +1814,49 @@
               audio: btoa(binary),
             }),
           );
-        };
+        }
+
+        let processor;
+        try {
+          const processorCode = `
+            class PcmCaptureProcessor extends AudioWorkletProcessor {
+              constructor(options) {
+                super();
+                this._bufferSize = options.processorOptions.bufferSize;
+                this._buffer = new Float32Array(this._bufferSize);
+                this._bufferFill = 0;
+              }
+              process(inputs) {
+                const channel = inputs[0]?.[0];
+                if (!channel) return true;
+                for (let i = 0; i < channel.length; i++) {
+                  this._buffer[this._bufferFill++] = channel[i];
+                  if (this._bufferFill >= this._bufferSize) {
+                    this.port.postMessage(this._buffer.slice(0));
+                    this._bufferFill = 0;
+                  }
+                }
+                return true;
+              }
+            }
+            registerProcessor('pcm-capture-processor', PcmCaptureProcessor);
+          `;
+          const blob = new Blob([processorCode], { type: "application/javascript" });
+          const blobUrl = URL.createObjectURL(blob);
+          await state.rtAudioCtx.audioWorklet.addModule(blobUrl);
+          URL.revokeObjectURL(blobUrl);
+          processor = new AudioWorkletNode(
+            state.rtAudioCtx,
+            "pcm-capture-processor",
+            { processorOptions: { bufferSize: CONFIG.RT_BUFFER_SIZE } },
+          );
+          processor.port.onmessage = (e) => sendFloat32(e.data);
+        } catch (e) {
+          // blob:null is blocked when opened via file:// — fall back to legacy API
+          console.warn("[RT] AudioWorklet unavailable, using ScriptProcessorNode:", e.message);
+          processor = state.rtAudioCtx.createScriptProcessor(CONFIG.RT_BUFFER_SIZE, 1, 1);
+          processor.onaudioprocess = (ev) => sendFloat32(ev.inputBuffer.getChannelData(0));
+        }
 
         source.connect(processor);
         processor.connect(state.rtAudioCtx.destination);
@@ -2455,6 +2491,7 @@
               stopRealtimeWS();
               connectRealtimeWS(state.micStream);
             }
+            temporarilyDisableButton(el.reconnectBtn, 500);
             return;
 
           case "open-settings":
