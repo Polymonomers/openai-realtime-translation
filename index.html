@@ -2950,7 +2950,7 @@
        * - 編集確定（blur / Escで離脱）時に履歴へ保存
        * - ライブ表示中（未確定）の段落は編集対象外
        */
-      function makeParagraphEditable(p) {
+      function makeParagraphEditable(p, clientX, clientY) {
         if (!p || p.isContentEditable) return;
 
         // ライブ表示中（未確定）の段落なら、編集が後続のdeltaで上書きされないよう
@@ -2972,14 +2972,34 @@
 
         const original = p.textContent;
         p.setAttribute("contenteditable", "true");
-        p.focus();
+        p.focus({ preventScroll: true });
 
-        // 全文選択
-        const range = document.createRange();
-        range.selectNodeContents(p);
+        // タップ位置にカーソルを置く（取得できなければ末尾）
         const sel = window.getSelection();
         sel.removeAllRanges();
-        sel.addRange(range);
+
+        let caretRange = null;
+        if (typeof clientX === "number" && typeof clientY === "number") {
+          if (document.caretRangeFromPoint) {
+            caretRange = document.caretRangeFromPoint(clientX, clientY);
+          } else if (document.caretPositionFromPoint) {
+            const pos = document.caretPositionFromPoint(clientX, clientY);
+            if (pos) {
+              caretRange = document.createRange();
+              caretRange.setStart(pos.offsetNode, pos.offset);
+            }
+          }
+        }
+
+        if (caretRange && p.contains(caretRange.startContainer)) {
+          caretRange.collapse(true);
+          sel.addRange(caretRange);
+        } else {
+          const r = document.createRange();
+          r.selectNodeContents(p);
+          r.collapse(false);
+          sel.addRange(r);
+        }
 
         const finish = (revert) => {
           p.removeAttribute("contenteditable");
@@ -3022,10 +3042,10 @@
         p.addEventListener("keydown", onKeydown);
       }
 
-      el.transcriptContainer.addEventListener("dblclick", (e) => {
+      el.transcriptContainer.addEventListener("click", (e) => {
         const p = e.target.closest("p.chatBox__message");
         if (!p) return;
-        makeParagraphEditable(p);
+        makeParagraphEditable(p, e.clientX, e.clientY);
       });
 
       // 初期化
