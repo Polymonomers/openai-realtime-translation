@@ -1039,6 +1039,8 @@
         historySaveTimerId: null,
         // AI要約関連
         aiSummaryLastProcessedLength: 0,
+        // 自動再接続
+        autoReconnectTimerId: null,
       };
 
       /* =========================
@@ -1389,6 +1391,29 @@
       }
 
       /**
+       * 自動再接続ウォッチドッグ：30秒間トランスクリプトの動きがなければ自動再接続
+       */
+      function resetAutoReconnectTimer() {
+        if (state.autoReconnectTimerId) clearTimeout(state.autoReconnectTimerId);
+        if (!state.sessionRunning) return;
+        state.autoReconnectTimerId = setTimeout(() => {
+          state.autoReconnectTimerId = null;
+          if (!state.sessionRunning || !state.micStream) return;
+          console.log("[RT] auto-reconnect: 30s inactivity detected");
+          stopRealtimeWS();
+          connectRealtimeWS(state.micStream);
+          resetAutoReconnectTimer();
+        }, 30000);
+      }
+
+      function clearAutoReconnectTimer() {
+        if (state.autoReconnectTimerId) {
+          clearTimeout(state.autoReconnectTimerId);
+          state.autoReconnectTimerId = null;
+        }
+      }
+
+      /**
        * セッションタイマー初期化
        */
       function clearSessionLimitTimer() {
@@ -1721,6 +1746,8 @@
       function stopSession() {
         clearSessionLimitTimer();
 
+        clearAutoReconnectTimer();
+
         // Realtime WebSocket を閉じる
         stopRealtimeWS();
 
@@ -1942,6 +1969,7 @@
           case "conversation.item.input_audio_transcription.delta": {
             const { item_id, delta } = ev;
             if (!delta) break;
+            resetAutoReconnectTimer();
 
             const buf = (store.rtBuffer.get(item_id) || "") + delta;
             const { completed, remainder } = splitAtSentenceBoundaries(buf);
@@ -1983,6 +2011,7 @@
 
           case "conversation.item.input_audio_transcription.completed": {
             const { item_id } = ev;
+            resetAutoReconnectTimer();
 
             // ライブ <p> を除去
             const lp = store.rtLivePara.get(item_id);
@@ -2420,6 +2449,7 @@
             updateSessionToggleUI(true);
             updateRealtimeButtons();
             startSessionLimitTimer();
+            resetAutoReconnectTimer();
           } catch (err) {
             state.sessionRunning = false;
             console.error(err);
