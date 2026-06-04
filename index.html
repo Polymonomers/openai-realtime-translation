@@ -2974,6 +2974,12 @@
           store.rtBuffer.set(liveItemId, "");
           const sentId = `${liveItemId}_edited_${Date.now()}`;
           store.userSpeech.set(sentId, p);
+
+          // 昇格（確定）した時点で、まず一度翻訳を走らせる
+          const t = (p.textContent || "").trim();
+          if (t && el.translateLangSelect.value !== "none") {
+            translateText(sentId, t);
+          }
         }
 
         const original = p.textContent;
