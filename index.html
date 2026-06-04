@@ -379,6 +379,12 @@
         background: #fef6d1;
       }
 
+      .chatBox__message[contenteditable="true"] {
+        outline: 2px solid var(--color-primary);
+        background: #fffbe6;
+        cursor: text;
+      }
+
       .chatBox--report {
         height: 180px;
       }
@@ -2878,6 +2884,149 @@
       el.textInput.addEventListener("input", () =>
         autoResizeTextarea(el.textInput),
       );
+
+      /**
+       * contenteditable内のキャレット位置にテキストを挿入する
+       * @param {string} text
+       */
+      function insertTextAtCaret(text) {
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return;
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        const node = document.createTextNode(text);
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.setEndAfter(node);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+
+      /**
+       * 要約（AIカラム）を全文から作り直す
+       * - メモ以外の要約バブルを削除し、文字数カウンタをリセットして再生成
+       */
+      async function regenerateSummaryAll() {
+        el.aiContainer
+          .querySelectorAll("p.chatBox__message--ai")
+          .forEach((p) => {
+            for (const [k, v] of store.ai) {
+              if (v === p) store.ai.delete(k);
+            }
+            p.remove();
+          });
+        state.aiSummaryLastProcessedLength = 0;
+        await updateConversationSummary();
+      }
+
+      /**
+       * 編集された文字起こし段落に合わせて、翻訳と要約をやり直す
+       * @param {HTMLParagraphElement} p
+       */
+      async function reprocessEditedParagraph(p) {
+        // メモは対象外
+        if (isCommentParagraph(p)) return;
+
+        const newText = (p.textContent || "").trim();
+
+        // 1) この文の翻訳をやり直す（同じitemIdの翻訳バブルを更新）
+        let sentId = null;
+        for (const [k, v] of store.userSpeech) {
+          if (v === p) {
+            sentId = k;
+            break;
+          }
+        }
+        if (sentId && newText && el.translateLangSelect.value !== "none") {
+          translateText(sentId, newText);
+        }
+
+        // 2) 要約を全文から作り直す
+        regenerateSummaryAll();
+      }
+
+      /**
+       * 文字起こしの段落をダブルクリックで編集可能にする
+       * - 編集確定（blur / Escで離脱）時に履歴へ保存
+       * - ライブ表示中（未確定）の段落は編集対象外
+       */
+      function makeParagraphEditable(p) {
+        if (!p || p.isContentEditable) return;
+
+        // ライブ表示中（未確定）の段落なら、編集が後続のdeltaで上書きされないよう
+        // 「確定扱い」に昇格させる（以降の認識結果は新しいバブルへ流れる）
+        let liveItemId = null;
+        for (const [id, lp] of store.rtLivePara) {
+          if (lp === p) {
+            liveItemId = id;
+            break;
+          }
+        }
+        const wasPromoted = !!liveItemId;
+        if (liveItemId) {
+          store.rtLivePara.delete(liveItemId);
+          store.rtBuffer.set(liveItemId, "");
+          const sentId = `${liveItemId}_edited_${Date.now()}`;
+          store.userSpeech.set(sentId, p);
+        }
+
+        const original = p.textContent;
+        p.setAttribute("contenteditable", "true");
+        p.focus();
+
+        // 全文選択
+        const range = document.createRange();
+        range.selectNodeContents(p);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+
+        const finish = (revert) => {
+          p.removeAttribute("contenteditable");
+          p.removeEventListener("blur", onBlur);
+          p.removeEventListener("keydown", onKeydown);
+          if (revert) {
+            p.textContent = original;
+          } else if (wasPromoted || p.textContent !== original) {
+            // 昇格バブルは未翻訳のため、変更がなくても必ず翻訳・要約する
+            reprocessEditedParagraph(p);
+            requestPersistHistorySnapshot({ debounceMs: 0 });
+          }
+        };
+
+        const onBlur = () => finish(false);
+        const onKeydown = (e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            finish(true);
+            p.blur();
+            return;
+          }
+          if (e.key !== "Enter") return;
+
+          const hasModifier =
+            e.shiftKey || e.ctrlKey || e.altKey || e.metaKey;
+
+          if (!hasModifier) {
+            // Enter単押し → 編集確定
+            e.preventDefault();
+            p.blur();
+          } else {
+            // Shift+Enter等 → 改行を挿入
+            e.preventDefault();
+            insertTextAtCaret("\n");
+          }
+        };
+
+        p.addEventListener("blur", onBlur);
+        p.addEventListener("keydown", onKeydown);
+      }
+
+      el.transcriptContainer.addEventListener("dblclick", (e) => {
+        const p = e.target.closest("p.chatBox__message");
+        if (!p) return;
+        makeParagraphEditable(p);
+      });
 
       // 初期化
       initLanguageSelects();
