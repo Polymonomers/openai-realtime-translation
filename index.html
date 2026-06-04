@@ -1047,6 +1047,8 @@
         aiSummaryLastProcessedLength: 0,
         // 自動再接続
         autoReconnectTimerId: null,
+        // 文字起こし編集中（自動スクロール抑止）
+        isEditingTranscript: false,
       };
 
       /* =========================
@@ -1206,6 +1208,10 @@
        * @param {HTMLElement} container
        */
       function scrollToBottom(container) {
+        // 文字起こし編集中は、編集中のバブルが流れないよう自動スクロールを抑止
+        if (state.isEditingTranscript && container === el.transcriptContainer) {
+          return;
+        }
         container.scrollTop = container.scrollHeight;
       }
 
@@ -2971,6 +2977,7 @@
         }
 
         const original = p.textContent;
+        state.isEditingTranscript = true;
         p.setAttribute("contenteditable", "true");
         p.focus({ preventScroll: true });
 
@@ -3002,6 +3009,7 @@
         }
 
         const finish = (revert) => {
+          state.isEditingTranscript = false;
           p.removeAttribute("contenteditable");
           p.removeEventListener("blur", onBlur);
           p.removeEventListener("keydown", onKeydown);
