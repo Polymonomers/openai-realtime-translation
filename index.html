@@ -2331,34 +2331,7 @@
           el.reportOutput.textContent = main;
 
           // ダウンロード用：コメント除外した各セクション + メモ一覧
-          const transcriptNoComments = getParagraphsTextWithoutComments(
-            el.transcriptContainer,
-          );
-          const translationNoComments = getParagraphsTextWithoutComments(
-            el.translationContainer,
-          );
-          const aiNoComments = getParagraphsTextWithoutComments(el.aiContainer);
-          const comments = getCommentsListText();
-
-          const sep = "\n\n" + "─".repeat(40) + "\n\n";
-
-          const downloadText =
-            "【議事録】\n" +
-            (main || "（空）") +
-            sep +
-            "【メモ一覧】\n" +
-            (comments || "（なし）") +
-            sep +
-            "【文字起こし】\n" +
-            (transcriptNoComments || "（空）") +
-            sep +
-            "【翻訳結果】\n" +
-            (translationNoComments || "（空）") +
-            sep +
-            "【AI応答】\n" +
-            (aiNoComments || "（空）");
-
-          setReportDownloadLink("report.txt", downloadText);
+          setReportDownloadLink("report.txt", buildReportDownloadText(main));
           el.reportBox.scrollTop = 0;
         } catch (err) {
           el.reportOutput.textContent =
@@ -2379,6 +2352,41 @@
           input: prompt,
           errorLabel: "OpenAI API error",
         });
+      }
+
+      /**
+       * ダウンロード用テキストを組み立てる（議事録本文 + メモ + 各セクション）
+       * @param {string} reportMain 議事録本文（空でも可）
+       * @returns {string}
+       */
+      function buildReportDownloadText(reportMain) {
+        const transcriptNoComments = getParagraphsTextWithoutComments(
+          el.transcriptContainer,
+        );
+        const translationNoComments = getParagraphsTextWithoutComments(
+          el.translationContainer,
+        );
+        const aiNoComments = getParagraphsTextWithoutComments(el.aiContainer);
+        const comments = getCommentsListText();
+
+        const sep = "\n\n" + "─".repeat(40) + "\n\n";
+
+        return (
+          "【議事録】\n" +
+          (reportMain || "（空）") +
+          sep +
+          "【メモ一覧】\n" +
+          (comments || "（なし）") +
+          sep +
+          "【文字起こし】\n" +
+          (transcriptNoComments || "（空）") +
+          sep +
+          "【翻訳結果】\n" +
+          (translationNoComments || "（空）") +
+          sep +
+          "【AI応答】\n" +
+          (aiNoComments || "（空）")
+        );
       }
 
       /**
@@ -2473,6 +2481,13 @@
         } else {
           state.sessionRunning = false;
           stopSession();
+
+          // 停止時点で、議事録は空のままテキストDLリンクを表示する
+          setReportDownloadLink(
+            "report.txt",
+            buildReportDownloadText(el.reportOutput?.textContent || ""),
+          );
+
           requestPersistHistorySnapshot({ debounceMs: 0 });
           updateSessionToggleUI(false);
           updateRealtimeButtons();
@@ -2909,24 +2924,7 @@
       }
 
       /**
-       * 要約（AIカラム）を全文から作り直す
-       * - メモ以外の要約バブルを削除し、文字数カウンタをリセットして再生成
-       */
-      async function regenerateSummaryAll() {
-        el.aiContainer
-          .querySelectorAll("p.chatBox__message--ai")
-          .forEach((p) => {
-            for (const [k, v] of store.ai) {
-              if (v === p) store.ai.delete(k);
-            }
-            p.remove();
-          });
-        state.aiSummaryLastProcessedLength = 0;
-        await updateConversationSummary();
-      }
-
-      /**
-       * 編集された文字起こし段落に合わせて、翻訳と要約をやり直す
+       * 編集された文字起こし段落に合わせて、翻訳をやり直す
        * @param {HTMLParagraphElement} p
        */
       async function reprocessEditedParagraph(p) {
@@ -2946,9 +2944,6 @@
         if (sentId && newText && el.translateLangSelect.value !== "none") {
           translateText(sentId, newText);
         }
-
-        // 2) 要約を全文から作り直す
-        regenerateSummaryAll();
       }
 
       /**
