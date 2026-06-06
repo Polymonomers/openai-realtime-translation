@@ -1013,14 +1013,17 @@
        */
       const CONFIG = {
         TRANSCRIBE_MODEL: "gpt-realtime-whisper",
+        TRANSLATE_RT_MODEL: "gpt-realtime-translate",
         REPORT_MODEL: "gpt-5.4-mini",
-        TRANSLATE_MODEL: "gpt-4.1-nano",
         AI_CLEAN_MODEL: "gpt-4.1-mini",
         AI_SUMMARY_CHUNK_CHARS: 100,
         RT_WS_URL: "wss://api.openai.com/v1/realtime?intent=transcription",
+        RT_TRANSLATE_WS_URL:
+          "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate",
         RT_SAMPLE_RATE: 24000,
         RT_BUFFER_SIZE: 4096,
         MAX_SESSION_MS: 6 * 60 * 60 * 1000,
+        AUTO_RECONNECT_IDLE_MS: 15 * 1000,
         HISTORY_MAX: 10,
       };
 
@@ -1037,6 +1040,7 @@
         rtAudioCtx: null,
         rtProcessor: null,
         isSpeaking: false,
+        rtMode: "transcription", // "transcription" | "translation"
         // セッション
         sessionRunning: false,
         sessionStartedAt: 0,
@@ -1047,8 +1051,9 @@
         aiSummaryLastProcessedLength: 0,
         // 自動再接続
         autoReconnectTimerId: null,
-        // 文字起こし編集中（自動スクロール抑止）
-        isEditingTranscript: false,
+        autoReconnectTimerId2: null,
+        // 編集中のコンテナ（自動スクロール抑止に使用）
+        editingContainer: null,
       };
 
       /* =========================
@@ -1198,6 +1203,11 @@
         ai: new Map(),
         rtBuffer: new Map(), // item_id → 未確定テキスト
         rtLivePara: new Map(), // item_id → ライブ表示中の <p>
+        // 翻訳セッション（gpt-realtime-translate）用ストリームバッファ
+        rtTransInBuf: "", // 原文（文字起こし）未確定テキスト
+        rtTransInLive: null, // 原文ライブ <p>
+        rtTransOutBuf: "", // 翻訳未確定テキスト
+        rtTransOutLive: null, // 翻訳ライブ <p>
       };
 
       /* =========================
@@ -1208,8 +1218,8 @@
        * @param {HTMLElement} container
        */
       function scrollToBottom(container) {
-        // 文字起こし編集中は、編集中のバブルが流れないよう自動スクロールを抑止
-        if (state.isEditingTranscript && container === el.transcriptContainer) {
+        // 編集中は、編集中のバブルが流れないよう対象コンテナの自動スクロールを抑止
+        if (state.editingContainer && container === state.editingContainer) {
           return;
         }
         container.scrollTop = container.scrollHeight;
@@ -1288,52 +1298,6 @@
       }
 
       /**
-       * 文字起こしに「日本語として扱う文字」（かな・漢字・半角カナ）が含まれるか
-       * @param {string} text
-       */
-      function hasJapaneseScriptInTranscript(text) {
-        return /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uFF66-\uFF9F]/.test(
-          text || "",
-        );
-      }
-
-      /**
-       * A–Z a–z 以外の拡張ラテン（ウムラウト等）を含むか。
-       * 英語だけ（ASCIIの字母・記号など）なら偽。
-       * @param {string} text
-       */
-      function hasExtendedLatinLettersBeyondAscii(text) {
-        const t = text || "";
-        try {
-          for (const ch of t) {
-            if (!/\p{Script=Latin}/u.test(ch)) continue;
-            if (!/^[A-Za-z]$/.test(ch)) return true;
-          }
-          return false;
-        } catch {
-          return /[\u00C0-\u024F\u1E00-\u1EFF]/.test(t);
-        }
-      }
-
-      /**
-       * 発言が日本語のとき、ロシア語・韓国語・アラビア語系・拡張ラテン（ウムラウト）など
-       * のみの文字起こしなら真（表示から除外する）。ASCII中心の英語は除外しない。
-       * @param {string} text
-       */
-      function isClearlyNonJapaneseScriptOnlyTranscript(text) {
-        const t = (text || "").trim();
-        if (!t) return false;
-        if (hasJapaneseScriptInTranscript(t)) return false;
-        if (/[\uAC00-\uD7A3]/.test(t)) return true;
-        if (/[\u0400-\u04FF]/.test(t)) return true;
-        if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(t)) return true;
-        if (/[\u0E00-\u0E7F]/.test(t)) return true;
-        if (/[\u0900-\u097F]/.test(t)) return true;
-        if (hasExtendedLatinLettersBeyondAscii(t)) return true;
-        return false;
-      }
-
-      /**
        * 文字起こし用の段落をDOMから外し、store から除去する
        * @param {string} itemId
        */
@@ -1364,6 +1328,8 @@
        */
       function forceSilenceCut() {
         if (!state.rtWs || state.rtWs.readyState !== WebSocket.OPEN) return;
+        // 翻訳セッションは連続処理のためcommit非対応
+        if (state.rtMode === "translation") return;
         state.rtWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
       }
 
@@ -1403,25 +1369,65 @@
       }
 
       /**
-       * 自動再接続ウォッチドッグ：30秒間トランスクリプトの動きがなければ自動再接続
+       * 自動再接続を実行する（重複発火しないよう全タイマーをクリアしてから再接続）
+       * @param {string} reason ログ用
        */
-      function resetAutoReconnectTimer() {
+      function triggerAutoReconnect(reason) {
+        if (!state.sessionRunning || !state.micStream) return;
+        clearAutoReconnectTimer();
+        console.log("[RT] auto-reconnect:", reason);
+        stopRealtimeWS();
+        connectRealtimeWS(state.micStream);
+        startAutoReconnectWatchdogs();
+      }
+
+      /**
+       * 文字起こし（原文）ウォッチドッグ：一定時間 文字起こしが止まれば再接続
+       */
+      function resetTranscriptWatchdog() {
         if (state.autoReconnectTimerId) clearTimeout(state.autoReconnectTimerId);
         if (!state.sessionRunning) return;
         state.autoReconnectTimerId = setTimeout(() => {
           state.autoReconnectTimerId = null;
-          if (!state.sessionRunning || !state.micStream) return;
-          console.log("[RT] auto-reconnect: 30s inactivity detected");
-          stopRealtimeWS();
-          connectRealtimeWS(state.micStream);
-          resetAutoReconnectTimer();
-        }, 30000);
+          triggerAutoReconnect("transcript idle");
+        }, CONFIG.AUTO_RECONNECT_IDLE_MS);
+      }
+
+      /**
+       * 翻訳ウォッチドッグ：翻訳モード時、一定時間 翻訳が止まれば再接続
+       */
+      function resetTranslationWatchdog() {
+        if (state.autoReconnectTimerId2)
+          clearTimeout(state.autoReconnectTimerId2);
+        if (!state.sessionRunning) return;
+        state.autoReconnectTimerId2 = setTimeout(() => {
+          state.autoReconnectTimerId2 = null;
+          triggerAutoReconnect("translation idle");
+        }, CONFIG.AUTO_RECONNECT_IDLE_MS);
+      }
+
+      /**
+       * セッション開始/再接続時にウォッチドッグを起動
+       * （翻訳モードのときは翻訳側も監視）
+       */
+      function startAutoReconnectWatchdogs() {
+        resetTranscriptWatchdog();
+        if (state.rtMode === "translation") {
+          resetTranslationWatchdog();
+        } else if (state.autoReconnectTimerId2) {
+          clearTimeout(state.autoReconnectTimerId2);
+          state.autoReconnectTimerId2 = null;
+        }
       }
 
       function clearAutoReconnectTimer() {
         if (state.autoReconnectTimerId) {
           clearTimeout(state.autoReconnectTimerId);
           state.autoReconnectTimerId = null;
+        }
+        if (state.autoReconnectTimerId2) {
+          clearTimeout(state.autoReconnectTimerId2);
+          state.autoReconnectTimerId2 = null;
         }
       }
 
@@ -1640,69 +1646,6 @@
         ].join("\n");
       }
 
-      /**
-       * AI出力から「あいさつ・了承だけ」の文をできるだけ取り除く
-       * （完全には防げないが、先頭の定型句を削ることで「承知しました」だけの応答を抑制）
-       * @param {string} text
-       * @returns {string}
-       */
-      function sanitizeAiOutput(text) {
-        if (!text) return text;
-        let t = text.trimStart();
-        const prefixes = [
-          "承知しました。",
-          "承知しました、",
-          "承知しました",
-          "了解しました。",
-          "了解しました、",
-          "了解しました",
-          "かしこまりました。",
-          "かしこまりました、",
-          "かしこまりました",
-          "了解です。",
-          "了解です、",
-          "了解です",
-          "わかりました。",
-          "わかりました、",
-          "わかりました",
-        ];
-
-        let changed = false;
-        for (const p of prefixes) {
-          if (t.startsWith(p)) {
-            t = t.slice(p.length).trimStart();
-            changed = true;
-          }
-        }
-
-        // すべてが定型句だけだった場合は空文字にする（呼び出し側で無視される）
-        if (changed && !t) return "";
-        return changed ? t : text;
-      }
-
-      /**
-       * 翻訳用プロンプトを生成する（翻訳文のみ出す）。
-       * @param {object} params
-       * @param {string} params.text
-       * @param {string} params.sourceLang
-       * @param {string} params.targetLang
-       * @returns {string}
-       */
-      function buildTranslatePrompt({ text, sourceLang, targetLang }) {
-        const source = getLangInfo(sourceLang).en;
-        const target = getLangInfo(targetLang).en;
-
-        return [
-          "You are a translation engine.",
-          "Translate the given text faithfully.",
-          "Do not add explanations, notes, or extra text. Output translation only.",
-          `Source: ${source}`,
-          `Target: ${target}`,
-          "",
-          "TEXT:",
-          text,
-        ].join("\n");
-      }
 
       function buildReportPrompt(transcript, summary) {
         return `
@@ -1785,36 +1728,75 @@
 
       function connectRealtimeWS(stream) {
         const apiKey = getApiKeyOrThrow();
-        const ws = new WebSocket(CONFIG.RT_WS_URL, [
+
+        // 翻訳先が指定されていれば翻訳セッション（gpt-realtime-translate）を使う
+        const translateOn =
+          (el.translateLangSelect?.value || "none") !== "none";
+        state.rtMode = translateOn ? "translation" : "transcription";
+
+        const url = translateOn
+          ? CONFIG.RT_TRANSLATE_WS_URL
+          : CONFIG.RT_WS_URL;
+
+        const ws = new WebSocket(url, [
           "realtime",
           "openai-insecure-api-key." + apiKey,
         ]);
         state.rtWs = ws;
 
         ws.onopen = async () => {
-          console.log("[RT] connected");
+          console.log("[RT] connected:", state.rtMode);
           const lang = el.transcriptLangSelect?.value || "auto";
-          ws.send(
-            JSON.stringify({
-              type: "session.update",
-              session: {
-                type: "transcription",
-                audio: {
-                  input: {
-                    format: { type: "audio/pcm", rate: CONFIG.RT_SAMPLE_RATE },
-                    transcription: {
-                      model: CONFIG.TRANSCRIBE_MODEL,
-                      ...(lang !== "auto" ? { language: lang } : {}),
+
+          if (state.rtMode === "translation") {
+            // 翻訳セッション: 原文文字起こし + 翻訳音声/テキストを連続出力
+            const target = el.translateLangSelect.value;
+            ws.send(
+              JSON.stringify({
+                type: "session.update",
+                session: {
+                  audio: {
+                    output: { language: target },
+                    input: {
+                      transcription: { model: CONFIG.TRANSCRIBE_MODEL },
+                      noise_reduction: { type: "near_field" },
                     },
                   },
                 },
-              },
-            }),
-          );
+              }),
+            );
+          } else {
+            // 文字起こし専用セッション
+            ws.send(
+              JSON.stringify({
+                type: "session.update",
+                session: {
+                  type: "transcription",
+                  audio: {
+                    input: {
+                      format: {
+                        type: "audio/pcm",
+                        rate: CONFIG.RT_SAMPLE_RATE,
+                      },
+                      transcription: {
+                        model: CONFIG.TRANSCRIBE_MODEL,
+                        ...(lang !== "auto" ? { language: lang } : {}),
+                      },
+                    },
+                  },
+                },
+              }),
+            );
+          }
+
           await startPcmCapture(stream);
         };
 
-        ws.onmessage = (e) => handleRealtimeEvent(JSON.parse(e.data));
+        ws.onmessage = (e) => {
+          const ev = JSON.parse(e.data);
+          if (state.rtMode === "translation") handleTranslationEvent(ev);
+          else handleRealtimeEvent(ev);
+        };
         ws.onerror = (e) => console.error("[RT] error", e);
         ws.onclose = (e) => {
           console.log("[RT] closed", e.code, e.reason);
@@ -1832,6 +1814,12 @@
           state.rtWs = null;
         }
         state.isSpeaking = false;
+
+        // 翻訳ストリームの未確定バッファを破棄（ライブ<p>はDOM側で管理）
+        store.rtTransInBuf = "";
+        store.rtTransInLive = null;
+        store.rtTransOutBuf = "";
+        store.rtTransOutLive = null;
       }
 
       async function startPcmCapture(stream) {
@@ -1852,16 +1840,27 @@
           for (let i = 0; i < bytes.length; i += 0x8000) {
             binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
           }
+          const appendType =
+            state.rtMode === "translation"
+              ? "session.input_audio_buffer.append"
+              : "input_audio_buffer.append";
           state.rtWs.send(
             JSON.stringify({
-              type: "input_audio_buffer.append",
+              type: appendType,
               audio: btoa(binary),
             }),
           );
         }
 
         let processor;
+        // file:// では blob:null のワークレット読み込みがブロックされ、
+        // フォールバックまでの遅延で文字起こしセッションが切断されることがあるため、
+        // 最初から ScriptProcessorNode を使う
+        const isFileOrigin =
+          location.protocol === "file:" || window.origin === "null";
+
         try {
+          if (isFileOrigin) throw new Error("file:// origin, skip AudioWorklet");
           const processorCode = `
             class PcmCaptureProcessor extends AudioWorkletProcessor {
               constructor(options) {
@@ -1945,20 +1944,185 @@
       function finalizeSentence(sentId, text) {
         text = text.trim();
         if (!text) return;
-        const sourceLang = el.transcriptLangSelect?.value || "auto";
-        if (
-          sourceLang === "ja" &&
-          isClearlyNonJapaneseScriptOnlyTranscript(text)
-        )
-          return;
         const p = createMessageParagraph("user", text);
         el.transcriptContainer.appendChild(p);
         store.userSpeech.set(sentId, p);
         scrollToBottom(el.transcriptContainer);
-        if (el.translateLangSelect.value !== "none")
-          translateText(sentId, text);
         updateConversationSummary();
         requestPersistHistorySnapshot();
+      }
+
+      /**
+       * 翻訳セッション（gpt-realtime-translate）の受信イベント処理
+       * - session.input_transcript.delta  : 原文（文字起こし）
+       * - session.output_transcript.delta : 翻訳テキスト
+       * - session.output_audio.delta      : 翻訳音声（未使用）
+       */
+      function handleTranslationEvent(ev) {
+        switch (ev.type) {
+          case "session.created":
+          case "session.updated":
+            console.log("[RT-T]", ev.type);
+            break;
+
+          case "session.input_transcript.delta":
+            if (ev.delta) {
+              resetTranscriptWatchdog();
+              pushInputTranscriptDelta(ev.delta);
+            }
+            break;
+
+          case "session.input_transcript.done":
+            // 残りの未確定テキストを確定（句読点なしで終わった末尾）
+            flushInputTranscript();
+            break;
+
+          case "session.output_transcript.delta":
+            if (ev.delta) {
+              resetTranslationWatchdog();
+              pushOutputTranslationDelta(ev.delta);
+            }
+            break;
+
+          case "session.output_transcript.done":
+            flushOutputTranslation();
+            break;
+
+          case "session.output_audio.delta":
+          case "session.output_audio.done":
+            // 翻訳音声は使用しない
+            break;
+
+          case "session.closed":
+            console.log("[RT-T] session closed");
+            break;
+
+          case "error":
+            console.error("[RT-T] error event:", ev.error);
+            break;
+
+          default:
+            console.log("[RT-T] unhandled:", ev.type);
+        }
+      }
+
+      /**
+       * 原文（文字起こし）デルタを文単位で確定し、文字起こし欄に表示
+       * @param {string} delta
+       */
+      function pushInputTranscriptDelta(delta) {
+        const buf = (store.rtTransInBuf || "") + delta;
+        const { completed, remainder } = splitAtSentenceBoundaries(buf);
+
+        if (completed.length > 0) {
+          if (store.rtTransInLive) {
+            store.rtTransInLive.remove();
+            store.rtTransInLive = null;
+          }
+          completed.forEach((s, i) =>
+            finalizeSentence(`rtin_${Date.now()}_${i}`, s),
+          );
+        }
+
+        store.rtTransInBuf = remainder;
+
+        if (remainder) {
+          if (!store.rtTransInLive) {
+            store.rtTransInLive = createMessageParagraph("user", remainder);
+            el.transcriptContainer.appendChild(store.rtTransInLive);
+          } else {
+            store.rtTransInLive.textContent = remainder;
+          }
+          scrollToBottom(el.transcriptContainer);
+        } else if (store.rtTransInLive) {
+          store.rtTransInLive.remove();
+          store.rtTransInLive = null;
+        }
+      }
+
+      /**
+       * 原文ストリームの残りを確定（完了イベント時）
+       */
+      function flushInputTranscript() {
+        if (store.rtTransInLive) {
+          store.rtTransInLive.remove();
+          store.rtTransInLive = null;
+        }
+        const rem = (store.rtTransInBuf || "").trim();
+        store.rtTransInBuf = "";
+        if (rem) finalizeSentence(`rtin_${Date.now()}_final`, rem);
+      }
+
+      /**
+       * 翻訳先が日本語のとき、末尾に句読点がなければ「。」を補う
+       * @param {string} text
+       * @returns {string}
+       */
+      function withTrailingTranslationPunctuation(text) {
+        const t = (text || "").trim();
+        if (!t) return t;
+        if (el.translateLangSelect.value !== "ja") return t;
+        if (/[。！？.!?…]$/.test(t)) return t;
+        return t + "。";
+      }
+
+      /**
+       * 翻訳ストリームの残りを確定（完了イベント時）
+       */
+      function flushOutputTranslation() {
+        if (store.rtTransOutLive) {
+          store.rtTransOutLive.remove();
+          store.rtTransOutLive = null;
+        }
+        const rem = (store.rtTransOutBuf || "").trim();
+        store.rtTransOutBuf = "";
+        if (rem) {
+          const p = createMessageParagraph(
+            "translate",
+            withTrailingTranslationPunctuation(rem),
+          );
+          el.translationContainer.appendChild(p);
+          scrollToBottom(el.translationContainer);
+        }
+      }
+
+      /**
+       * 翻訳デルタを文単位で確定し、翻訳欄に表示
+       * @param {string} delta
+       */
+      function pushOutputTranslationDelta(delta) {
+        const buf = (store.rtTransOutBuf || "") + delta;
+        const { completed, remainder } = splitAtSentenceBoundaries(buf);
+
+        if (completed.length > 0) {
+          if (store.rtTransOutLive) {
+            store.rtTransOutLive.remove();
+            store.rtTransOutLive = null;
+          }
+          completed.forEach((s) => {
+            const p = createMessageParagraph(
+              "translate",
+              withTrailingTranslationPunctuation(s),
+            );
+            el.translationContainer.appendChild(p);
+          });
+          scrollToBottom(el.translationContainer);
+        }
+
+        store.rtTransOutBuf = remainder;
+
+        if (remainder) {
+          if (!store.rtTransOutLive) {
+            store.rtTransOutLive = createMessageParagraph("translate", remainder);
+            el.translationContainer.appendChild(store.rtTransOutLive);
+          } else {
+            store.rtTransOutLive.textContent = remainder;
+          }
+          scrollToBottom(el.translationContainer);
+        } else if (store.rtTransOutLive) {
+          store.rtTransOutLive.remove();
+          store.rtTransOutLive = null;
+        }
       }
 
       function handleRealtimeEvent(ev) {
@@ -1981,7 +2145,7 @@
           case "conversation.item.input_audio_transcription.delta": {
             const { item_id, delta } = ev;
             if (!delta) break;
-            resetAutoReconnectTimer();
+            resetTranscriptWatchdog();
 
             const buf = (store.rtBuffer.get(item_id) || "") + delta;
             const { completed, remainder } = splitAtSentenceBoundaries(buf);
@@ -2023,7 +2187,7 @@
 
           case "conversation.item.input_audio_transcription.completed": {
             const { item_id } = ev;
-            resetAutoReconnectTimer();
+            resetTranscriptWatchdog();
 
             // ライブ <p> を除去
             const lp = store.rtLivePara.get(item_id);
@@ -2051,43 +2215,6 @@
       /* =========================
         Translate
       ========================= */
-      /**
-       * APIで翻訳し、翻訳欄を更新する
-       * @param {string} itemId
-       * @param {string} text
-       */
-      async function translateText(itemId, text) {
-        try {
-          const source =
-            el.transcriptLangSelect.value === "auto"
-              ? "auto"
-              : el.transcriptLangSelect.value;
-
-          const target = el.translateLangSelect.value;
-          if (target === "none") return;
-
-          const translated = await translateWithOpenAI({
-            text,
-            sourceLang: source,
-            targetLang: target,
-          });
-
-          if (!translated) return;
-
-          let p = store.translation.get(itemId);
-          if (!p) {
-            p = createMessageParagraph("translate");
-            el.translationContainer.appendChild(p);
-            store.translation.set(itemId, p);
-          }
-
-          p.textContent = translated;
-          scrollToBottom(el.translationContainer);
-        } catch (err) {
-          console.error(err);
-        }
-      }
-
       /**
        * OpenAI Responsesのレスポンスから「テキスト部分」だけ抽出します。
        * - `output_text` があればそれを優先
@@ -2148,22 +2275,6 @@
         return extractOpenAIResponseText(data);
       }
 
-      /**
-       * OpenAI API 翻訳実行
-       * @param {string} text テキスト
-       * @param {string} sourceLang 元の言語
-       * @param {string} targetLang 翻訳先
-       */
-      async function translateWithOpenAI({ text, sourceLang, targetLang }) {
-        const prompt = buildTranslatePrompt({ text, sourceLang, targetLang });
-        return callOpenAIResponses({
-          model: CONFIG.TRANSLATE_MODEL,
-          input: prompt,
-          temperature: 0,
-          errorLabel: "OpenAI translate error",
-        });
-      }
-
       /* =========================
         AI Cleanup (Transcript)
       ========================= */
@@ -2180,16 +2291,17 @@
           const newSegment = payload?.newSegment ?? "";
           if (!newSegment.trim()) return;
 
-          const cleaned = await incrementalCleanupWithOpenAI({
-            fullTranscript,
-            newSegment,
-          });
-          const sanitized = sanitizeAiOutput(cleaned);
-          if (!sanitized) return;
+          const cleaned = (
+            await incrementalCleanupWithOpenAI({
+              fullTranscript,
+              newSegment,
+            })
+          )?.trim();
+          if (!cleaned) return;
 
           const p = createMessageParagraph("ai");
           el.aiContainer.appendChild(p);
-          p.textContent = sanitized;
+          p.textContent = cleaned;
 
           // 必要なら将来参照できるように map にも保持しておく
           if (key) {
@@ -2469,7 +2581,7 @@
             updateSessionToggleUI(true);
             updateRealtimeButtons();
             startSessionLimitTimer();
-            resetAutoReconnectTimer();
+            startAutoReconnectWatchdogs();
           } catch (err) {
             state.sessionRunning = false;
             console.error(err);
@@ -2924,61 +3036,52 @@
       }
 
       /**
-       * 編集された文字起こし段落に合わせて、翻訳をやり直す
+       * ライブ表示中（未確定）の段落なら「確定扱い」に昇格させる。
+       * 以降のdeltaは新しいバブルへ流れるため、編集が上書きされない。
        * @param {HTMLParagraphElement} p
+       * @returns {boolean} 昇格したら true
        */
-      async function reprocessEditedParagraph(p) {
-        // メモは対象外
-        if (isCommentParagraph(p)) return;
-
-        const newText = (p.textContent || "").trim();
-
-        // 1) この文の翻訳をやり直す（同じitemIdの翻訳バブルを更新）
-        let sentId = null;
-        for (const [k, v] of store.userSpeech) {
-          if (v === p) {
-            sentId = k;
-            break;
+      function freezeLiveParagraph(p) {
+        // 文字起こし専用モードのライブ段落（item_idごと）
+        for (const [id, lp] of store.rtLivePara) {
+          if (lp === p) {
+            store.rtLivePara.delete(id);
+            store.rtBuffer.set(id, "");
+            store.userSpeech.set(`${id}_edited_${Date.now()}`, p);
+            return true;
           }
         }
-        if (sentId && newText && el.translateLangSelect.value !== "none") {
-          translateText(sentId, newText);
+        // 翻訳モードの原文ライブ段落
+        if (p === store.rtTransInLive) {
+          store.rtTransInLive = null;
+          store.rtTransInBuf = "";
+          store.userSpeech.set(`rtin_edited_${Date.now()}`, p);
+          return true;
         }
+        // 翻訳モードの翻訳ライブ段落
+        if (p === store.rtTransOutLive) {
+          store.rtTransOutLive = null;
+          store.rtTransOutBuf = "";
+          return true;
+        }
+        return false;
       }
 
       /**
-       * 文字起こしの段落をダブルクリックで編集可能にする
-       * - 編集確定（blur / Escで離脱）時に履歴へ保存
-       * - ライブ表示中（未確定）の段落は編集対象外
+       * 段落をクリックで編集可能にする（文字起こし・翻訳・要約 共通）
+       * - クリック時点でライブ段落は確定扱いに昇格（デルタ途中でも編集可）
+       * - 編集確定（blur / Enter / Escで離脱）時に履歴へ保存
        */
       function makeParagraphEditable(p, clientX, clientY) {
         if (!p || p.isContentEditable) return;
 
-        // ライブ表示中（未確定）の段落なら、編集が後続のdeltaで上書きされないよう
-        // 「確定扱い」に昇格させる（以降の認識結果は新しいバブルへ流れる）
-        let liveItemId = null;
-        for (const [id, lp] of store.rtLivePara) {
-          if (lp === p) {
-            liveItemId = id;
-            break;
-          }
-        }
-        const wasPromoted = !!liveItemId;
-        if (liveItemId) {
-          store.rtLivePara.delete(liveItemId);
-          store.rtBuffer.set(liveItemId, "");
-          const sentId = `${liveItemId}_edited_${Date.now()}`;
-          store.userSpeech.set(sentId, p);
+        const container = p.closest(".chatBox");
 
-          // 昇格（確定）した時点で、まず一度翻訳を走らせる
-          const t = (p.textContent || "").trim();
-          if (t && el.translateLangSelect.value !== "none") {
-            translateText(sentId, t);
-          }
-        }
+        // ライブ（未確定）バブルなら確定扱いに昇格させる
+        const wasPromoted = freezeLiveParagraph(p);
 
         const original = p.textContent;
-        state.isEditingTranscript = true;
+        state.editingContainer = container;
         p.setAttribute("contenteditable", "true");
         p.focus({ preventScroll: true });
 
@@ -3010,15 +3113,13 @@
         }
 
         const finish = (revert) => {
-          state.isEditingTranscript = false;
+          state.editingContainer = null;
           p.removeAttribute("contenteditable");
           p.removeEventListener("blur", onBlur);
           p.removeEventListener("keydown", onKeydown);
           if (revert) {
             p.textContent = original;
           } else if (wasPromoted || p.textContent !== original) {
-            // 昇格バブルは未翻訳のため、変更がなくても必ず翻訳・要約する
-            reprocessEditedParagraph(p);
             requestPersistHistorySnapshot({ debounceMs: 0 });
           }
         };
@@ -3051,10 +3152,27 @@
         p.addEventListener("keydown", onKeydown);
       }
 
-      el.transcriptContainer.addEventListener("click", (e) => {
-        const p = e.target.closest("p.chatBox__message");
-        if (!p) return;
-        makeParagraphEditable(p, e.clientX, e.clientY);
+      [
+        el.transcriptContainer,
+        el.translationContainer,
+        el.aiContainer,
+      ].forEach((container) => {
+        container.addEventListener("click", (e) => {
+          const p = e.target.closest("p.chatBox__message");
+          if (!p) return;
+          makeParagraphEditable(p, e.clientX, e.clientY);
+        });
+      });
+
+      /**
+       * 稼働中に翻訳先を変更したら、モード（文字起こし⇄翻訳）を切り替えるため再接続する
+       */
+      el.translateLangSelect.addEventListener("change", () => {
+        if (state.sessionRunning && state.micStream) {
+          stopRealtimeWS();
+          connectRealtimeWS(state.micStream);
+          startAutoReconnectWatchdogs();
+        }
       });
 
       // 初期化
