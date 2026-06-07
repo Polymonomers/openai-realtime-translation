@@ -407,6 +407,37 @@
       }
 
       /* =========================
+        infographic Component
+      ========================= */
+      #infographic {
+        margin-top: 18px;
+      }
+
+      .infographicBox {
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg);
+        padding: 12px;
+        min-height: 120px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .infographicBox__hint {
+        margin: 0;
+        font-size: 13px;
+        opacity: 0.7;
+        text-align: center;
+      }
+
+      .infographicBox__img {
+        max-width: 100%;
+        height: auto;
+        border-radius: var(--radius-sm);
+      }
+
+      /* =========================
         inputGroup Component
       ========================= */
       #textInputWrapper {
@@ -899,6 +930,50 @@
         </div>
       </div>
 
+      <div id="infographic" class="section">
+        <h3 class="panelTitle">
+          <i
+            class="fa-solid fa-paintbrush panelTitle__icon"
+            aria-hidden="true"
+          ></i>
+          画像
+          <span class="panelTitle__actions">
+            <a
+              id="infographicDownloadLink"
+              href="#"
+              download="infographic.png"
+              class="textLink is-hidden"
+            >
+              <i class="fa-solid fa-download" aria-hidden="true"></i>
+              画像
+            </a>
+
+            <button
+              id="generateInfographicBtn"
+              class="btn"
+              data-action="generate-infographic"
+              aria-label="インフォグラフィック生成"
+              title="インフォグラフィック生成"
+            >
+              <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i>
+              生成
+            </button>
+          </span>
+        </h3>
+
+        <div id="infographicBox" class="infographicBox">
+          <p
+            id="infographicPlaceholder"
+            class="infographicBox__hint is-hidden"
+          ></p>
+          <img
+            id="infographicImage"
+            class="infographicBox__img is-hidden"
+            alt="インフォグラフィック"
+          />
+        </div>
+      </div>
+
       <div id="downloadAudio"></div>
       <div
         id="settingsModal"
@@ -1016,6 +1091,8 @@
         TRANSLATE_RT_MODEL: "gpt-realtime-translate",
         REPORT_MODEL: "gpt-5.4-mini",
         AI_CLEAN_MODEL: "gpt-4.1-mini",
+        IMAGE_MODEL: "gpt-image-2",
+        IMAGE_SIZE: "1024x1024",
         AI_SUMMARY_CHUNK_CHARS: 100,
         RT_WS_URL: "wss://api.openai.com/v1/realtime?intent=transcription",
         RT_TRANSLATE_WS_URL:
@@ -1179,6 +1256,19 @@
         reportDownloadLink: document.getElementById("reportDownloadLink"),
         generateReportBtn: document.getElementById("generateReportBtn"),
 
+        // インフォグラフィック
+        infographicBox: document.getElementById("infographicBox"),
+        infographicImage: document.getElementById("infographicImage"),
+        infographicPlaceholder: document.getElementById(
+          "infographicPlaceholder",
+        ),
+        infographicDownloadLink: document.getElementById(
+          "infographicDownloadLink",
+        ),
+        generateInfographicBtn: document.getElementById(
+          "generateInfographicBtn",
+        ),
+
         // 設定
         settingsModal: document.getElementById("settingsModal"),
         apiKeyInput: document.getElementById("apiKeyInput"),
@@ -1213,15 +1303,35 @@
       /* =========================
         Utilities
       ========================= */
+      // この距離以内なら「最下部付近」とみなす（追従する）
+      const SCROLL_STICK_THRESHOLD_PX = 80;
+
+      /**
+       * コンテナが最下部付近にあるか
+       * @param {HTMLElement} container
+       */
+      function isNearBottom(container) {
+        return (
+          container.scrollHeight -
+            container.scrollTop -
+            container.clientHeight <=
+          SCROLL_STICK_THRESHOLD_PX
+        );
+      }
+
       /**
        * 対象コンテナを最下部までスクロールする
+       * - 編集中、またはユーザーが上にスクロールしている間は強制スクロールしない。
+       * - 追従可否は「手動スクロール時に更新されるフラグ」で判定するため、
+       *   長いバブルが一度に追加されても（位置は変わらないので）追従が外れない。
+       *   最下部付近に戻せば自動で追従を再開する。
        * @param {HTMLElement} container
        */
       function scrollToBottom(container) {
-        // 編集中は、編集中のバブルが流れないよう対象コンテナの自動スクロールを抑止
         if (state.editingContainer && container === state.editingContainer) {
           return;
         }
+        if (container._stickToBottom === false) return;
         container.scrollTop = container.scrollHeight;
       }
 
@@ -1523,6 +1633,14 @@
         el.reportOutput.textContent = "";
         el.reportDownloadLink.classList.add("is-hidden");
         el.reportDownloadLink.href = "#";
+
+        // インフォグラフィックもリセット
+        el.infographicImage.src = "";
+        el.infographicImage.classList.add("is-hidden");
+        el.infographicDownloadLink.classList.add("is-hidden");
+        el.infographicDownloadLink.href = "#";
+        el.infographicPlaceholder.textContent = "";
+        el.infographicPlaceholder.classList.add("is-hidden");
 
         state.aiSummaryLastProcessedLength = 0;
       }
@@ -2516,6 +2634,102 @@
       }
 
       /* =========================
+        Infographic Generation
+      ========================= */
+      /**
+       * インフォグラフィック生成用プロンプト
+       * @param {string} transcript
+       * @returns {string}
+       */
+      function buildInfographicPrompt(transcript) {
+        return [
+          "会議・打ち合わせの内容を、1枚絵の日本語インフォグラフィックにしてください。",
+          "要件：",
+          "・すべてのテキストラベル・見出し・注釈は自然で正確な日本語にすること。",
+          "・要点を図解・アイコン・矢印・簡単なグラフなどで分かりやすく整理する。",
+          "・タイトルを上部に大きく配置し、清潔でビジネス向けの配色にする。",
+          "・文字化けや意味不明な文字を入れず、読みやすいレイアウトにする。",
+          "",
+          "会議内容：",
+          transcript,
+        ].join("\n");
+      }
+
+      /**
+       * 発言内容からインフォグラフィック画像を生成する
+       */
+      async function generateInfographic() {
+        if (el.generateInfographicBtn?.disabled) return;
+
+        const transcript = getParagraphsTextWithoutComments(
+          el.transcriptContainer,
+        ).trim();
+        if (!transcript) {
+          alert("発言内容がありません。");
+          return;
+        }
+
+        const originalHTML = el.generateInfographicBtn.innerHTML;
+        el.generateInfographicBtn.disabled = true;
+        el.generateInfographicBtn.innerHTML =
+          '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> 生成中...';
+
+        try {
+          const b64 = await generateImageWithOpenAI(
+            buildInfographicPrompt(transcript),
+          );
+          const dataUrl = `data:image/png;base64,${b64}`;
+
+          el.infographicImage.src = dataUrl;
+          el.infographicImage.classList.remove("is-hidden");
+          el.infographicPlaceholder.classList.add("is-hidden");
+
+          el.infographicDownloadLink.href = dataUrl;
+          el.infographicDownloadLink.download = `infographic_${Date.now()}.png`;
+          el.infographicDownloadLink.classList.remove("is-hidden");
+        } catch (err) {
+          console.error(err);
+          el.infographicPlaceholder.textContent =
+            "生成に失敗しました。\n" + (err?.message || String(err));
+          el.infographicPlaceholder.classList.remove("is-hidden");
+        } finally {
+          el.generateInfographicBtn.disabled = false;
+          el.generateInfographicBtn.innerHTML = originalHTML;
+        }
+      }
+
+      /**
+       * OpenAI Images API で画像を生成し、base64（PNG）を返す
+       * @param {string} prompt
+       * @returns {Promise<string>} base64文字列
+       */
+      async function generateImageWithOpenAI(prompt) {
+        const res = await fetch("https://api.openai.com/v1/images/generations", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${getApiKeyOrThrow()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: CONFIG.IMAGE_MODEL,
+            prompt,
+            size: CONFIG.IMAGE_SIZE,
+            n: 1,
+          }),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          throw new Error(`OpenAI image error: ${res.status} ${errText}`);
+        }
+
+        const data = await res.json();
+        const b64 = data?.data?.[0]?.b64_json;
+        if (!b64) throw new Error("画像データが取得できませんでした。");
+        return b64;
+      }
+
+      /* =========================
         UI Events
       ========================= */
       /**
@@ -2639,6 +2853,10 @@
           case "generate-report":
             await generateReport();
             requestPersistHistorySnapshot();
+            return;
+
+          case "generate-infographic":
+            await generateInfographic();
             return;
 
           case "copy-report": {
@@ -3162,6 +3380,16 @@
           if (!p) return;
           makeParagraphEditable(p, e.clientX, e.clientY);
         });
+
+        // スクロール位置に応じて追従フラグを更新
+        // （最下部付近なら追従ON、上に離れたら追従OFF）
+        container.addEventListener(
+          "scroll",
+          () => {
+            container._stickToBottom = isNearBottom(container);
+          },
+          { passive: true },
+        );
       });
 
       /**
