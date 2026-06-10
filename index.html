@@ -386,7 +386,7 @@
       }
 
       .chatBox--report {
-        height: 180px;
+        height: 130px;
       }
 
       /* =========================
@@ -417,11 +417,20 @@
         border: 1px solid var(--color-border);
         border-radius: var(--radius-md);
         background: var(--color-bg);
-        padding: 12px;
-        min-height: 120px;
+        padding: 6px;
+        min-height: 40px;
+        max-height: 80px;
+        overflow: hidden;
         display: flex;
         align-items: center;
         justify-content: center;
+      }
+
+      .infographicBox.is-empty {
+        border: none;
+        background: transparent;
+        min-height: 0;
+        padding: 0;
       }
 
       .infographicBox__hint {
@@ -433,8 +442,10 @@
 
       .infographicBox__img {
         max-width: 100%;
+        max-height: 68px;
         height: auto;
         border-radius: var(--radius-sm);
+        object-fit: contain;
       }
 
       /* =========================
@@ -961,7 +972,7 @@
           </span>
         </h3>
 
-        <div id="infographicBox" class="infographicBox">
+        <div id="infographicBox" class="infographicBox is-empty">
           <p
             id="infographicPlaceholder"
             class="infographicBox__hint is-hidden"
@@ -1642,6 +1653,7 @@
         el.infographicDownloadLink.href = "#";
         el.infographicPlaceholder.textContent = "";
         el.infographicPlaceholder.classList.add("is-hidden");
+        el.infographicBox.classList.add("is-empty");
 
         state.aiSummaryLastProcessedLength = 0;
       }
@@ -2718,6 +2730,7 @@
           el.infographicImage.src = dataUrl;
           el.infographicImage.classList.remove("is-hidden");
           el.infographicPlaceholder.classList.add("is-hidden");
+          el.infographicBox.classList.remove("is-empty");
 
           el.infographicDownloadLink.href = dataUrl;
           el.infographicDownloadLink.download = `infographic_${Date.now()}.png`;
@@ -2727,6 +2740,7 @@
           el.infographicPlaceholder.textContent =
             "生成に失敗しました。\n" + (err?.message || String(err));
           el.infographicPlaceholder.classList.remove("is-hidden");
+          el.infographicBox.classList.remove("is-empty");
         } finally {
           el.generateInfographicBtn.disabled = false;
           el.generateInfographicBtn.innerHTML = originalHTML;
