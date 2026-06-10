@@ -507,11 +507,107 @@
       .modal__panel {
         position: relative;
         width: min(560px, calc(100vw - 24px));
+        max-height: calc(100vh - 40px);
+        overflow-y: auto;
         background: var(--color-bg);
         border: 1px solid var(--color-border);
         border-radius: var(--radius-md);
         box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
         padding: 14px;
+      }
+
+      /* =========================
+        Dictionary Section
+      ========================= */
+      .dictSection {
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px solid var(--color-border);
+      }
+
+      .dictSection__title {
+        font-size: 13px;
+        font-weight: 600;
+        margin: 0 0 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .dictList {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin-bottom: 10px;
+        max-height: 180px;
+        overflow-y: auto;
+      }
+
+      .dictEntry {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        padding: 4px 6px;
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-subtle);
+      }
+
+      .dictEntry__from {
+        flex: 1;
+        color: #c0392b;
+        font-weight: 600;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .dictEntry__arrow {
+        opacity: 0.45;
+        font-size: 11px;
+        flex-shrink: 0;
+      }
+
+      .dictEntry__to {
+        flex: 1;
+        color: #1a7f4b;
+        font-weight: 600;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .dictAddRow {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+
+      .dictAddRow__input {
+        flex: 1;
+        height: 32px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--color-border);
+        padding: 0 8px;
+        font-size: 13px;
+        box-sizing: border-box;
+        outline: none;
+        font-family: inherit;
+        min-width: 0;
+      }
+
+      .dictAddRow__input:focus {
+        border-color: var(--color-primary);
+        box-shadow: 0 0 0 1px var(--color-primary);
+      }
+
+      .dictEmpty {
+        font-size: 12px;
+        opacity: 0.5;
+        text-align: center;
+        padding: 8px 0;
       }
 
       .modal__header {
@@ -761,7 +857,7 @@
         <button
           id="settingsBtn"
           class="btn btn--primary btn--circle"
-          data-action="open-settings"
+          data-action="open-history"
           aria-label="設定"
           title="設定"
         >
@@ -998,7 +1094,7 @@
         <div class="modal__panel">
           <div class="modal__header">
             <h3 id="settingsTitle" class="modal__title">
-              <i class="fa-solid fa-gear" aria-hidden="true"></i>
+              <i class="fa-solid fa-key" aria-hidden="true"></i>
               APIキー設定
             </h3>
             <button
@@ -1069,6 +1165,11 @@
                 APIキー
               </button>
 
+              <button class="btn" data-action="open-dict-modal">
+                <i class="fa-solid fa-book" aria-hidden="true"></i>
+                辞書登録
+              </button>
+
               <button
                 class="btn"
                 data-action="clear-history"
@@ -1087,6 +1188,77 @@
             </div>
           </div>
         </aside>
+      </div>
+
+      <!-- 辞書登録モーダル -->
+      <div
+        id="dictModal"
+        class="modal is-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dictModalTitle"
+      >
+        <div class="modal__backdrop" data-action="close-dict"></div>
+        <div class="modal__panel">
+          <div class="modal__header">
+            <h3 id="dictModalTitle" class="modal__title">
+              <i class="fa-solid fa-book" aria-hidden="true"></i>
+              自動置換辞書
+            </h3>
+            <button
+              class="btn btn--icon"
+              data-action="close-dict"
+              aria-label="閉じる"
+              title="閉じる"
+            >
+              <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="modal__body">
+            <div class="modal__hint" style="margin-bottom:10px;">
+              文字起こし・翻訳・AI要約が確定したとき、登録したキーワードを自動で置換します。
+            </div>
+            <div id="dictList" class="dictList">
+              <!-- JSで描画 -->
+            </div>
+            <div class="dictAddRow" style="margin-top:10px;">
+              <input
+                id="dictFromInput"
+                class="dictAddRow__input"
+                type="text"
+                placeholder="変換前（例：闘争）"
+              />
+              <i class="fa-solid fa-arrow-right dictEntry__arrow" style="flex-shrink:0;" aria-hidden="true"></i>
+              <input
+                id="dictToInput"
+                class="dictAddRow__input"
+                type="text"
+                placeholder="変換後（例：東ソー）"
+              />
+              <button
+                class="btn btn--primary"
+                style="flex-shrink:0; height:32px; padding:0 12px;"
+                data-action="add-dict-entry"
+                title="追加"
+              >
+                <i class="fa-solid fa-plus" aria-hidden="true"></i>
+                追加
+              </button>
+            </div>
+          </div>
+
+          <div class="modal__footer">
+            <button class="btn" data-action="clear-dict">
+              <i class="fa-solid fa-trash" aria-hidden="true"></i>
+              全削除
+            </button>
+            <button class="btn" data-action="close-dict">
+              <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+              閉じる
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1283,6 +1455,9 @@
         // 設定
         settingsModal: document.getElementById("settingsModal"),
         apiKeyInput: document.getElementById("apiKeyInput"),
+
+        // 辞書
+        dictModal: document.getElementById("dictModal"),
 
         // 履歴
         historyDrawer: document.getElementById("historyDrawer"),
@@ -1569,6 +1744,7 @@
       const STORAGE_KEYS = {
         OPENAI_API_KEY: "openai_api_key",
         HISTORY: "transreport_history_v1",
+        DICTIONARY: "transreport_dictionary_v1",
       };
 
       function loadApiKey() {
@@ -1581,6 +1757,87 @@
 
       function deleteApiKey() {
         localStorage.removeItem(STORAGE_KEYS.OPENAI_API_KEY);
+      }
+
+      /* =========================
+        Dictionary (自動置換辞書)
+      ========================= */
+      /**
+       * 辞書をローカルストレージから読み込む
+       * @returns {{ from: string, to: string }[]}
+       */
+      function loadDictionary() {
+        try {
+          return JSON.parse(localStorage.getItem(STORAGE_KEYS.DICTIONARY) || "[]");
+        } catch {
+          return [];
+        }
+      }
+
+      /**
+       * 辞書をローカルストレージに保存する
+       * @param {{ from: string, to: string }[]} dict
+       */
+      function saveDictionary(dict) {
+        localStorage.setItem(STORAGE_KEYS.DICTIONARY, JSON.stringify(dict));
+      }
+
+      /**
+       * 辞書を適用してテキストを変換する
+       * @param {string} text
+       * @returns {string}
+       */
+      function applyDictionary(text) {
+        if (!text) return text;
+        const dict = loadDictionary();
+        let result = text;
+        for (const entry of dict) {
+          if (!entry.from) continue;
+          // 特殊文字をエスケープしてグローバル置換
+          const escaped = entry.from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          result = result.replace(new RegExp(escaped, "g"), entry.to);
+        }
+        return result;
+      }
+
+      /**
+       * 辞書リストをモーダル内に描画する
+       */
+      function renderDictList() {
+        const listEl = document.getElementById("dictList");
+        if (!listEl) return;
+        const dict = loadDictionary();
+        listEl.innerHTML = "";
+        if (dict.length === 0) {
+          listEl.innerHTML = '<p class="dictEmpty">登録なし</p>';
+          return;
+        }
+        dict.forEach((entry, idx) => {
+          const row = document.createElement("div");
+          row.className = "dictEntry";
+          row.innerHTML = `
+            <span class="dictEntry__from">${escapeHtml(entry.from)}</span>
+            <span class="dictEntry__arrow">→</span>
+            <span class="dictEntry__to">${escapeHtml(entry.to)}</span>
+            <button class="btn btn--icon" data-action="delete-dict-entry" data-idx="${idx}" title="削除" style="margin-left:auto;">
+              <i class="fa-solid fa-trash" aria-hidden="true"></i>
+            </button>
+          `;
+          listEl.appendChild(row);
+        });
+      }
+
+      /**
+       * HTML特殊文字をエスケープする（辞書表示用）
+       * @param {string} str
+       * @returns {string}
+       */
+      function escapeHtml(str) {
+        return String(str)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
       }
 
       function hasApiKey() {
@@ -1604,6 +1861,16 @@
 
       function closeSettings() {
         el.settingsModal.classList.add("is-hidden");
+      }
+
+      function openDictModal() {
+        renderDictList();
+        el.dictModal.classList.remove("is-hidden");
+        setTimeout(() => document.getElementById("dictFromInput")?.focus(), 0);
+      }
+
+      function closeDictModal() {
+        el.dictModal.classList.add("is-hidden");
       }
 
       function updateApiKeyGateUI() {
@@ -2082,7 +2349,7 @@
       }
 
       function finalizeSentence(sentId, text) {
-        text = text.trim();
+        text = applyDictionary(text.trim());
         if (!text) return;
         const p = createMessageParagraph("user", text);
         el.transcriptContainer.appendChild(p);
@@ -2167,11 +2434,12 @@
         store.rtTransInBuf = remainder;
 
         if (remainder) {
+          const liveText = applyDictionary(remainder);
           if (!store.rtTransInLive) {
-            store.rtTransInLive = createMessageParagraph("user", remainder);
+            store.rtTransInLive = createMessageParagraph("user", liveText);
             el.transcriptContainer.appendChild(store.rtTransInLive);
           } else {
-            store.rtTransInLive.textContent = remainder;
+            store.rtTransInLive.textContent = liveText;
           }
           scrollToBottom(el.transcriptContainer);
         } else if (store.rtTransInLive) {
@@ -2219,7 +2487,7 @@
         if (rem) {
           const p = createMessageParagraph(
             "translate",
-            withTrailingTranslationPunctuation(rem),
+            applyDictionary(withTrailingTranslationPunctuation(rem)),
           );
           el.translationContainer.appendChild(p);
           scrollToBottom(el.translationContainer);
@@ -2242,7 +2510,7 @@
           completed.forEach((s) => {
             const p = createMessageParagraph(
               "translate",
-              withTrailingTranslationPunctuation(s),
+              applyDictionary(withTrailingTranslationPunctuation(s)),
             );
             el.translationContainer.appendChild(p);
           });
@@ -2252,14 +2520,15 @@
         store.rtTransOutBuf = remainder;
 
         if (remainder) {
+          const liveText = applyDictionary(remainder);
           if (!store.rtTransOutLive) {
             store.rtTransOutLive = createMessageParagraph(
               "translate",
-              remainder,
+              liveText,
             );
             el.translationContainer.appendChild(store.rtTransOutLive);
           } else {
-            store.rtTransOutLive.textContent = remainder;
+            store.rtTransOutLive.textContent = liveText;
           }
           scrollToBottom(el.translationContainer);
         } else if (store.rtTransOutLive) {
@@ -2307,15 +2576,16 @@
 
             store.rtBuffer.set(item_id, remainder);
 
-            // 未確定テキストをライブ <p> に表示
+            // 未確定テキストをライブ <p> に表示（辞書変換も適用）
             if (remainder) {
+              const liveText = applyDictionary(remainder);
               let lp = store.rtLivePara.get(item_id);
               if (!lp) {
-                lp = createMessageParagraph("user", remainder);
+                lp = createMessageParagraph("user", liveText);
                 el.transcriptContainer.appendChild(lp);
                 store.rtLivePara.set(item_id, lp);
               } else {
-                lp.textContent = remainder;
+                lp.textContent = liveText;
               }
               scrollToBottom(el.transcriptContainer);
             } else {
@@ -2434,12 +2704,14 @@
           const newSegment = payload?.newSegment ?? "";
           if (!newSegment.trim()) return;
 
-          const cleaned = (
-            await incrementalCleanupWithOpenAI({
-              fullTranscript,
-              newSegment,
-            })
-          )?.trim();
+          const cleaned = applyDictionary(
+            (
+              await incrementalCleanupWithOpenAI({
+                fullTranscript,
+                newSegment,
+              })
+            )?.trim()
+          );
           if (!cleaned) return;
 
           const p = createMessageParagraph("ai");
@@ -2939,6 +3211,7 @@
             return;
 
           case "open-settings":
+          case "open-history":
             openHistoryDrawer();
             return;
 
@@ -2970,6 +3243,50 @@
             return;
           }
 
+          case "add-dict-entry": {
+            const fromEl = document.getElementById("dictFromInput");
+            const toEl = document.getElementById("dictToInput");
+            const from = (fromEl?.value || "").trim();
+            const to = (toEl?.value || "").trim();
+            if (!from) {
+              alert("変換前のキーワードを入力してください。");
+              fromEl?.focus();
+              return;
+            }
+            const dict = loadDictionary();
+            // 重複チェック
+            if (dict.some((e) => e.from === from)) {
+              alert(`「${from}」はすでに登録されています。`);
+              return;
+            }
+            dict.push({ from, to });
+            saveDictionary(dict);
+            if (fromEl) fromEl.value = "";
+            if (toEl) toEl.value = "";
+            renderDictList();
+            return;
+          }
+
+          case "delete-dict-entry": {
+            const idx = parseInt(button.dataset.idx, 10);
+            if (isNaN(idx)) return;
+            const dict = loadDictionary();
+            if (!dict[idx]) return;
+            dict.splice(idx, 1);
+            saveDictionary(dict);
+            renderDictList();
+            return;
+          }
+
+          case "clear-dict": {
+            if (loadDictionary().length === 0) return;
+            const ok = confirm("辞書を全て削除しますか？");
+            if (!ok) return;
+            saveDictionary([]);
+            renderDictList();
+            return;
+          }
+
           case "close-history":
             closeHistoryDrawer();
             return;
@@ -2977,6 +3294,15 @@
           case "open-settings-modal":
             closeHistoryDrawer();
             openKeyModal();
+            return;
+
+          case "open-dict-modal":
+            closeHistoryDrawer();
+            openDictModal();
+            return;
+
+          case "close-dict":
+            closeDictModal();
             return;
 
           case "restore-history": {
@@ -3279,6 +3605,16 @@
         e.preventDefault();
         insertNewlineAtCursor(el.textInput);
         autoResizeTextarea(el.textInput);
+      });
+
+      // 辞書入力欄: Enterで追加
+      ["dictFromInput", "dictToInput"].forEach((id) => {
+        document.getElementById(id)?.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            document.querySelector('[data-action="add-dict-entry"]')?.click();
+          }
+        });
       });
 
       /**
