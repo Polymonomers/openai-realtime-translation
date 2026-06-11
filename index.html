@@ -419,11 +419,12 @@
         background: var(--color-bg);
         padding: 6px;
         min-height: 40px;
-        max-height: 80px;
-        overflow: hidden;
         display: flex;
-        align-items: center;
-        justify-content: center;
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: flex-start;
+        /* 枠内スクロールはせず、ページ全体のスクロールで画像全体を見る */
+        overflow: visible;
       }
 
       .infographicBox.is-empty {
@@ -441,11 +442,11 @@
       }
 
       .infographicBox__img {
+        /* 原寸を上限に、枠幅を超える場合だけ縮小（拡大はしない） */
         max-width: 100%;
-        max-height: 68px;
         height: auto;
         border-radius: var(--radius-sm);
-        object-fit: contain;
+        display: block;
       }
 
       /* =========================
@@ -1040,7 +1041,7 @@
       <div id="infographic" class="section">
         <h3 class="panelTitle">
           <i
-            class="fa-solid fa-paintbrush panelTitle__icon"
+            class="fa-solid fa-image panelTitle__icon"
             aria-hidden="true"
           ></i>
           画像
