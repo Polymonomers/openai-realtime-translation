@@ -3420,6 +3420,12 @@
             const ok = confirm("全て消去しますか？");
             if (!ok) return;
             clearConversationPanels();
+
+            // 稼働中でなければ、以降は新規セッション扱い（現在の履歴/タイトルから切り離す）
+            if (!state.sessionRunning) {
+              state.historyCurrentId = null;
+              setTitleBarEntry(null);
+            }
             return;
           }
 
