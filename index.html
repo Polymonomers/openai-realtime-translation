@@ -1185,10 +1185,7 @@
 
       <div id="infographic" class="section">
         <h3 class="panelTitle">
-          <i
-            class="fa-solid fa-image panelTitle__icon"
-            aria-hidden="true"
-          ></i>
+          <i class="fa-solid fa-image panelTitle__icon" aria-hidden="true"></i>
           画像
           <span class="panelTitle__actions">
             <a
@@ -1334,7 +1331,7 @@
               <div class="drawer__toggleText">
                 <p class="drawer__toggleTitle">履歴に音声・画像も保存する</p>
                 <p class="drawer__toggleHint">
-                  ONにすると、セッションの音声データや生成したインフォグラフィック画像も履歴に保存されます。OFFの場合はテキストのみ保存されます。
+                  ON：音声や画像も保存｜OFF：テキストのみ保存
                 </p>
               </div>
             </div>
@@ -1375,20 +1372,24 @@
           </div>
 
           <div class="modal__body">
-            <div class="modal__hint" style="margin-bottom:10px;">
+            <div class="modal__hint" style="margin-bottom: 10px">
               文字起こし・翻訳・AI要約が確定したとき、登録したキーワードを自動で置換します。
             </div>
             <div id="dictList" class="dictList">
               <!-- JSで描画 -->
             </div>
-            <div class="dictAddRow" style="margin-top:10px;">
+            <div class="dictAddRow" style="margin-top: 10px">
               <input
                 id="dictFromInput"
                 class="dictAddRow__input"
                 type="text"
                 placeholder="変換前（例：闘争）"
               />
-              <i class="fa-solid fa-arrow-right dictEntry__arrow" style="flex-shrink:0;" aria-hidden="true"></i>
+              <i
+                class="fa-solid fa-arrow-right dictEntry__arrow"
+                style="flex-shrink: 0"
+                aria-hidden="true"
+              ></i>
               <input
                 id="dictToInput"
                 class="dictAddRow__input"
@@ -1397,7 +1398,7 @@
               />
               <button
                 class="btn btn--primary"
-                style="flex-shrink:0; height:32px; padding:0 12px;"
+                style="flex-shrink: 0; height: 32px; padding: 0 12px"
                 data-action="add-dict-entry"
                 title="追加"
               >
@@ -1961,7 +1962,9 @@
        */
       function loadDictionary() {
         try {
-          return JSON.parse(localStorage.getItem(STORAGE_KEYS.DICTIONARY) || "[]");
+          return JSON.parse(
+            localStorage.getItem(STORAGE_KEYS.DICTIONARY) || "[]",
+          );
         } catch {
           return [];
         }
@@ -2911,7 +2914,7 @@
                 fullTranscript,
                 newSegment,
               })
-            )?.trim()
+            )?.trim(),
           );
           if (!cleaned) return;
 
@@ -3919,7 +3922,8 @@
 
       async function openHistoryDrawer() {
         el.historyDrawer.classList.remove("is-hidden");
-        if (el.saveMediaToggle) el.saveMediaToggle.checked = isSaveMediaEnabled();
+        if (el.saveMediaToggle)
+          el.saveMediaToggle.checked = isSaveMediaEnabled();
         await renderHistoryList();
       }
 
@@ -4240,7 +4244,8 @@
         initLanguageSelects();
         updateApiKeyGateUI();
         await renderHistoryList();
-        if (el.saveMediaToggle) el.saveMediaToggle.checked = isSaveMediaEnabled();
+        if (el.saveMediaToggle)
+          el.saveMediaToggle.checked = isSaveMediaEnabled();
 
         // タイトルバーは毎回未開始状態（下書き空）で初期化する
         setTitleBarEntry(null);
