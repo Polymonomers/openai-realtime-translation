@@ -154,6 +154,56 @@
         opacity: 0.8;
       }
 
+      .sessionTitleBar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 12px;
+      }
+
+      .sessionTitleText {
+        flex: 1;
+        min-width: 0;
+        margin: 0;
+        padding: 6px 10px;
+        border-radius: var(--radius-md);
+        border: 1px dashed transparent;
+        cursor: pointer;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: var(--control-font);
+      }
+
+      .sessionTitleText:hover,
+      .sessionTitleText:focus-visible {
+        border-color: var(--color-border);
+        background: var(--color-bg-subtle);
+        outline: none;
+      }
+
+      .sessionTitleText:empty::before {
+        content: "タイトル未設定";
+        opacity: 0.5;
+      }
+
+      .sessionTitleInput {
+        flex: 1;
+        min-width: 0;
+        height: var(--control-h);
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        padding: 0 12px;
+        box-sizing: border-box;
+        outline: none;
+        font-size: var(--control-font);
+      }
+
+      .sessionTitleInput:focus {
+        border-color: var(--color-primary);
+        box-shadow: 0 0 0 1px var(--color-primary);
+      }
+
       .column {
         flex: 1;
         display: flex;
@@ -731,6 +781,84 @@
       }
 
       /* =========================
+        Toggle Switch
+      ========================= */
+      .drawer__toggleRow {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 10px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-subtle);
+        margin-bottom: 12px;
+      }
+
+      .toggleSwitch {
+        position: relative;
+        display: inline-block;
+        width: 44px;
+        height: 24px;
+        flex: 0 0 auto;
+        cursor: pointer;
+      }
+
+      .toggleSwitch input {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        margin: 0;
+        cursor: pointer;
+      }
+
+      .toggleSwitch__track {
+        position: absolute;
+        inset: 0;
+        background: var(--color-border);
+        border-radius: var(--radius-full);
+        transition: background 0.15s ease;
+        pointer-events: none;
+      }
+
+      .toggleSwitch__track::before {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 20px;
+        height: 20px;
+        background: #fff;
+        border-radius: var(--radius-full);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+        transition: transform 0.15s ease;
+      }
+
+      .toggleSwitch input:checked + .toggleSwitch__track {
+        background: var(--color-primary);
+      }
+
+      .toggleSwitch input:checked + .toggleSwitch__track::before {
+        transform: translateX(20px);
+      }
+
+      .drawer__toggleText {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .drawer__toggleTitle {
+        font-weight: 700;
+        font-size: 13px;
+        margin: 0 0 4px;
+      }
+
+      .drawer__toggleHint {
+        font-size: 12px;
+        opacity: 0.75;
+        margin: 0;
+      }
+
+      /* =========================
         History List
       ========================= */
       .historyList {
@@ -864,6 +992,23 @@
         >
           <i class="fa-solid fa-gear" aria-hidden="true"></i>
         </button>
+      </div>
+      <div id="sessionTitleBar" class="section sessionTitleBar">
+        <p
+          id="sessionTitleText"
+          class="sessionTitleText"
+          tabindex="0"
+          role="button"
+          aria-label="タイトルを編集"
+          title="クリックして編集"
+        ></p>
+        <input
+          id="sessionTitleInput"
+          type="text"
+          class="sessionTitleInput is-hidden"
+          maxlength="100"
+          autocomplete="off"
+        />
       </div>
       <div id="conversationWrapper" class="section">
         <div class="column">
@@ -1181,6 +1326,19 @@
               </button>
             </div>
 
+            <div class="drawer__toggleRow">
+              <label class="toggleSwitch" for="saveMediaToggle">
+                <input type="checkbox" id="saveMediaToggle" />
+                <span class="toggleSwitch__track"></span>
+              </label>
+              <div class="drawer__toggleText">
+                <p class="drawer__toggleTitle">履歴に音声・画像も保存する</p>
+                <p class="drawer__toggleHint">
+                  ONにすると、セッションの音声データや生成したインフォグラフィック画像も履歴に保存されます。OFFの場合はテキストのみ保存されます。
+                </p>
+              </div>
+            </div>
+
             <div id="historyList" class="historyList"></div>
 
             <div class="drawer__hint">
@@ -1296,6 +1454,7 @@
         micStream: null,
         mediaRecorder: null, // 全体録音（音声DL用）
         recordedChunks: [],
+        lastAudioDataUrl: null, // 履歴保存用（設定ONの場合のみ）
         // Realtime WebSocket
         rtWs: null,
         rtAudioCtx: null,
@@ -1308,6 +1467,10 @@
         sessionLimitTimerId: null,
         historyCurrentId: null,
         historySaveTimerId: null,
+        titleBarEntryId: null,
+        titleBarEntryTitle: "",
+        draftTitle: "", // セッション開始前に入力された下書きタイトル
+        titleEditCancelled: false,
         // AI要約関連
         aiSummaryLastProcessedLength: 0,
         // 自動再接続
@@ -1419,6 +1582,8 @@
         forceSilenceBtn: document.getElementById("forceSilenceBtn"),
         reconnectBtn: document.getElementById("reconnectBtn"),
         mediaDownloadLink: document.getElementById("mediaDownloadLink"),
+        sessionTitleText: document.getElementById("sessionTitleText"),
+        sessionTitleInput: document.getElementById("sessionTitleInput"),
 
         // 言語セレクト
         transcriptLangSelect: document.getElementById("transcriptLang"),
@@ -1463,6 +1628,7 @@
         // 履歴
         historyDrawer: document.getElementById("historyDrawer"),
         historyList: document.getElementById("historyList"),
+        saveMediaToggle: document.getElementById("saveMediaToggle"),
       };
 
       /* =========================
@@ -1746,6 +1912,7 @@
         OPENAI_API_KEY: "openai_api_key",
         HISTORY: "transreport_history_v1",
         DICTIONARY: "transreport_dictionary_v1",
+        SAVE_MEDIA: "transreport_save_media_v1",
       };
 
       function loadApiKey() {
@@ -1758,6 +1925,31 @@
 
       function deleteApiKey() {
         localStorage.removeItem(STORAGE_KEYS.OPENAI_API_KEY);
+      }
+
+      /**
+       * 履歴に音声・画像データも保存するかの設定
+       */
+      function isSaveMediaEnabled() {
+        return localStorage.getItem(STORAGE_KEYS.SAVE_MEDIA) === "1";
+      }
+
+      function setSaveMediaEnabled(enabled) {
+        localStorage.setItem(STORAGE_KEYS.SAVE_MEDIA, enabled ? "1" : "0");
+      }
+
+      /**
+       * Blob を base64 data URL に変換する
+       * @param {Blob} blob
+       * @returns {Promise<string>}
+       */
+      function blobToDataUrl(blob) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
       }
 
       /* =========================
@@ -2084,6 +2276,7 @@
 
         // 全体録音（音声DLリンク用）
         state.recordedChunks = [];
+        state.lastAudioDataUrl = null;
         state.mediaRecorder = new MediaRecorder(state.micStream);
         state.mediaRecorder.ondataavailable = (e) => {
           if (e.data.size > 0) state.recordedChunks.push(e.data);
@@ -2114,6 +2307,13 @@
             state.recordedChunks = [];
             el.mediaDownloadLink.href = URL.createObjectURL(blob);
             el.mediaDownloadLink.classList.remove("is-hidden");
+
+            if (isSaveMediaEnabled()) {
+              blobToDataUrl(blob).then((dataUrl) => {
+                state.lastAudioDataUrl = dataUrl;
+                requestPersistHistorySnapshot({ debounceMs: 0 });
+              });
+            }
           };
         }
 
@@ -2830,6 +3030,23 @@
         }
       }
 
+      /**
+       * 現在のタイトルからファイル名用のベース文字列を作る
+       * @param {string} fallback タイトル未設定時に使うベース名
+       * @returns {string}
+       */
+      function buildFilenameBase(fallback) {
+        const title = (state.titleBarEntryTitle || "").trim();
+        if (!title) return fallback;
+
+        const sanitized = title
+          .replace(/[\\/:*?"<>|]/g, "_")
+          .replace(/\s+/g, "_")
+          .slice(0, 50);
+
+        return sanitized || fallback;
+      }
+
       /* =========================
         Report Generation
       ======================== */
@@ -2854,7 +3071,10 @@
         el.reportOutput.textContent = main;
 
         // ダウンロード用：コメント除外した各セクション + メモ一覧
-        setReportDownloadLink("report.txt", buildReportDownloadText(main));
+        setReportDownloadLink(
+          `${buildFilenameBase("report")}.txt`,
+          buildReportDownloadText(main),
+        );
         el.reportBox.scrollTop = 0;
         return main;
       }
@@ -3006,8 +3226,10 @@
           el.infographicBox.classList.remove("is-empty");
 
           el.infographicDownloadLink.href = dataUrl;
-          el.infographicDownloadLink.download = `infographic_${Date.now()}.png`;
+          el.infographicDownloadLink.download = `${buildFilenameBase("infographic")}_${Date.now()}.png`;
           el.infographicDownloadLink.classList.remove("is-hidden");
+
+          requestPersistHistorySnapshot({ debounceMs: 0 });
         } catch (err) {
           console.error(err);
           el.infographicPlaceholder.textContent =
@@ -3116,7 +3338,7 @@
 
           try {
             await startSession();
-            beginHistorySession();
+            await beginHistorySession();
             updateSessionToggleUI(true);
             updateRealtimeButtons();
             startSessionLimitTimer();
@@ -3135,7 +3357,7 @@
 
           // 停止時点で、議事録は空のままテキストDLリンクを表示する
           setReportDownloadLink(
-            "report.txt",
+            `${buildFilenameBase("report")}.txt`,
             buildReportDownloadText(el.reportOutput?.textContent || ""),
           );
 
@@ -3213,7 +3435,7 @@
 
           case "open-settings":
           case "open-history":
-            openHistoryDrawer();
+            await openHistoryDrawer();
             return;
 
           case "close-settings":
@@ -3309,7 +3531,7 @@
           case "restore-history": {
             const id = button.dataset.historyId;
             if (!id) return;
-            restoreHistoryById(id);
+            await restoreHistoryById(id);
             return;
           }
 
@@ -3318,14 +3540,14 @@
             if (!id) return;
             const ok = confirm("この履歴を削除しますか？");
             if (!ok) return;
-            deleteHistoryById(id);
+            await deleteHistoryById(id);
             return;
           }
 
           case "clear-history": {
             const ok = confirm("履歴を全て削除しますか？");
             if (!ok) return;
-            clearHistoryAll();
+            await clearHistoryAll();
             return;
           }
 
@@ -3335,7 +3557,7 @@
       });
 
       /* =========================
-        History (localStorage)
+        History (IndexedDB)
       ========================= */
       function pad2(n) {
         return String(n).padStart(2, "0");
@@ -3348,18 +3570,98 @@
         )}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
       }
 
-      function loadHistoryList() {
+      const IDB_DB_NAME = "transreport_db";
+      const IDB_DB_VERSION = 1;
+      const IDB_STORE_HISTORY = "history";
+
+      function openHistoryDb() {
+        return new Promise((resolve, reject) => {
+          const req = indexedDB.open(IDB_DB_NAME, IDB_DB_VERSION);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(IDB_STORE_HISTORY)) {
+              db.createObjectStore(IDB_STORE_HISTORY, { keyPath: "id" });
+            }
+          };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      async function idbGetAllHistory() {
+        const db = await openHistoryDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_STORE_HISTORY, "readonly");
+          const req = tx.objectStore(IDB_STORE_HISTORY).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      async function idbGetHistory(id) {
+        const db = await openHistoryDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_STORE_HISTORY, "readonly");
+          const req = tx.objectStore(IDB_STORE_HISTORY).get(id);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      async function idbPutHistory(entry) {
+        const db = await openHistoryDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_STORE_HISTORY, "readwrite");
+          tx.objectStore(IDB_STORE_HISTORY).put(entry);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      }
+
+      async function idbDeleteHistory(id) {
+        const db = await openHistoryDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_STORE_HISTORY, "readwrite");
+          tx.objectStore(IDB_STORE_HISTORY).delete(id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      }
+
+      async function idbClearHistory() {
+        const db = await openHistoryDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_STORE_HISTORY, "readwrite");
+          tx.objectStore(IDB_STORE_HISTORY).clear();
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      }
+
+      /**
+       * 旧バージョン（localStorage）の履歴データが残っていればIndexedDBへ移行する
+       */
+      async function migrateHistoryFromLocalStorageIfNeeded() {
+        const raw = localStorage.getItem(STORAGE_KEYS.HISTORY);
+        if (!raw) return;
+
         try {
-          const raw = localStorage.getItem(STORAGE_KEYS.HISTORY);
-          const arr = JSON.parse(raw || "[]");
-          return Array.isArray(arr) ? arr : [];
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) {
+            for (const entry of arr) {
+              await idbPutHistory(entry);
+            }
+          }
         } catch {
-          return [];
+          // 破損データは無視して削除する
+        } finally {
+          localStorage.removeItem(STORAGE_KEYS.HISTORY);
         }
       }
 
-      function saveHistoryList(list) {
-        localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(list));
+      async function loadHistoryList() {
+        const list = await idbGetAllHistory();
+        return list.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
       }
 
       function serializeContainerWithVariants(container) {
@@ -3394,7 +3696,7 @@
       }
 
       function buildHistorySnapshot() {
-        return {
+        const snapshot = {
           langs: {
             transcript: el.transcriptLangSelect.value,
             translate: el.translateLangSelect.value,
@@ -3409,16 +3711,28 @@
           aiItems: serializeContainerWithVariants(el.aiContainer),
           reportText: el.reportOutput?.textContent || "",
         };
+
+        if (isSaveMediaEnabled()) {
+          const hasInfographic =
+            !!el.infographicImage?.src &&
+            !el.infographicImage.classList.contains("is-hidden");
+
+          snapshot.media = {
+            audioDataUrl: state.lastAudioDataUrl || null,
+            infographicDataUrl: hasInfographic ? el.infographicImage.src : null,
+          };
+        }
+
+        return snapshot;
       }
 
-      function beginHistorySession() {
+      async function beginHistorySession() {
         const startedAt = Date.now();
         const id = String(startedAt);
-        const title = formatTitleFromTs(startedAt);
 
         const entry = {
           id,
-          title,
+          title: (state.draftTitle || "").trim(),
           startedAt,
           updatedAt: startedAt,
           snapshot: {
@@ -3434,40 +3748,42 @@
           },
         };
 
-        const list = loadHistoryList();
-        list.unshift(entry);
-        while (list.length > CONFIG.HISTORY_MAX) list.pop();
-        saveHistoryList(list);
+        await idbPutHistory(entry);
+
+        const list = await loadHistoryList();
+        const excess = list.slice(CONFIG.HISTORY_MAX);
+        for (const old of excess) {
+          await idbDeleteHistory(old.id);
+        }
 
         state.historyCurrentId = id;
-        renderHistoryList();
+        setTitleBarEntry(entry);
+        await renderHistoryList();
       }
 
       function requestPersistHistorySnapshot({ debounceMs = 500 } = {}) {
         if (!state.historyCurrentId) return;
 
         if (state.historySaveTimerId) clearTimeout(state.historySaveTimerId);
-        state.historySaveTimerId = setTimeout(() => {
+        state.historySaveTimerId = setTimeout(async () => {
           state.historySaveTimerId = null;
 
-          const list = loadHistoryList();
-          const idx = list.findIndex((x) => x.id === state.historyCurrentId);
-          if (idx === -1) return;
+          const entry = await idbGetHistory(state.historyCurrentId);
+          if (!entry) return;
 
-          list[idx] = {
-            ...list[idx],
+          const updated = {
+            ...entry,
             updatedAt: Date.now(),
             snapshot: buildHistorySnapshot(),
           };
 
-          saveHistoryList(list);
-          renderHistoryList();
+          await idbPutHistory(updated);
+          await renderHistoryList();
         }, debounceMs);
       }
 
-      function restoreHistoryById(id) {
-        const list = loadHistoryList();
-        const entry = list.find((x) => x.id === id);
+      async function restoreHistoryById(id) {
+        const entry = await idbGetHistory(id);
         if (!entry) return;
 
         const snap = entry.snapshot || {};
@@ -3496,26 +3812,58 @@
 
         el.reportOutput.textContent = snap.reportText || "";
 
+        if (snap.media?.audioDataUrl) {
+          el.mediaDownloadLink.href = snap.media.audioDataUrl;
+          el.mediaDownloadLink.classList.remove("is-hidden");
+        }
+
+        if (snap.media?.infographicDataUrl) {
+          el.infographicImage.src = snap.media.infographicDataUrl;
+          el.infographicImage.classList.remove("is-hidden");
+          el.infographicPlaceholder.classList.add("is-hidden");
+          el.infographicBox.classList.remove("is-empty");
+          el.infographicDownloadLink.href = snap.media.infographicDataUrl;
+          el.infographicDownloadLink.classList.remove("is-hidden");
+        }
+
+        setTitleBarEntry(entry);
+        state.historyCurrentId = id;
+
         closeHistoryDrawer();
       }
 
-      function deleteHistoryById(id) {
-        const list = loadHistoryList().filter((x) => x.id !== id);
-        saveHistoryList(list);
+      async function updateHistoryTitle(id, title) {
+        const entry = await idbGetHistory(id);
+        if (!entry) return null;
+
+        const updated = { ...entry, title };
+        await idbPutHistory(updated);
+        await renderHistoryList();
+        return updated;
+      }
+
+      async function deleteHistoryById(id) {
+        await idbDeleteHistory(id);
         if (state.historyCurrentId === id) state.historyCurrentId = null;
-        renderHistoryList();
+
+        if (state.titleBarEntryId === id) {
+          setTitleBarEntry(null);
+        }
+
+        await renderHistoryList();
       }
 
-      function clearHistoryAll() {
-        localStorage.removeItem(STORAGE_KEYS.HISTORY);
+      async function clearHistoryAll() {
+        await idbClearHistory();
         state.historyCurrentId = null;
-        renderHistoryList();
+        setTitleBarEntry(null);
+        await renderHistoryList();
       }
 
-      function renderHistoryList() {
+      async function renderHistoryList() {
         if (!el.historyList) return;
 
-        const list = loadHistoryList();
+        const list = await loadHistoryList();
         el.historyList.innerHTML = "";
 
         if (list.length === 0) {
@@ -3535,7 +3883,10 @@
 
           const title = document.createElement("p");
           title.className = "historyItem__title";
-          title.textContent = h.title || "(無題)";
+          title.textContent =
+            h.title && h.title.trim()
+              ? h.title
+              : formatTitleFromTs(h.startedAt || h.updatedAt || Date.now());
 
           const meta = document.createElement("p");
           meta.className = "historyItem__meta";
@@ -3566,13 +3917,49 @@
         }
       }
 
-      function openHistoryDrawer() {
+      async function openHistoryDrawer() {
         el.historyDrawer.classList.remove("is-hidden");
-        renderHistoryList();
+        if (el.saveMediaToggle) el.saveMediaToggle.checked = isSaveMediaEnabled();
+        await renderHistoryList();
       }
 
       function closeHistoryDrawer() {
         el.historyDrawer.classList.add("is-hidden");
+      }
+
+      /**
+       * タイトルバー表示（開始ボタン下）: 現在の履歴エントリのタイトルをクリックで編集
+       */
+      function renderSessionTitleText(entry) {
+        if (!el.sessionTitleText) return;
+        if (entry) {
+          el.sessionTitleText.textContent =
+            entry.title && entry.title.trim()
+              ? entry.title
+              : formatTitleFromTs(
+                  entry.startedAt || entry.updatedAt || Date.now(),
+                );
+        } else {
+          // セッション開始前：下書きタイトルをそのまま表示
+          el.sessionTitleText.textContent = state.draftTitle || "";
+        }
+      }
+
+      function setTitleBarEntry(entry) {
+        state.titleBarEntryId = entry ? entry.id : null;
+        state.titleBarEntryTitle = entry ? entry.title || "" : "";
+        if (entry) state.draftTitle = "";
+        renderSessionTitleText(entry);
+      }
+
+      function enterTitleEditMode() {
+        el.sessionTitleText.classList.add("is-hidden");
+        el.sessionTitleInput.classList.remove("is-hidden");
+        el.sessionTitleInput.value = state.titleBarEntryId
+          ? state.titleBarEntryTitle || ""
+          : state.draftTitle || "";
+        el.sessionTitleInput.focus();
+        el.sessionTitleInput.select();
       }
 
       /**
@@ -3789,10 +4176,75 @@
         }
       });
 
+      /**
+       * タイトル表示テキスト：クリック（またはEnter/Space）で編集モードへ
+       */
+      el.sessionTitleText?.addEventListener("click", enterTitleEditMode);
+      el.sessionTitleText?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          enterTitleEditMode();
+        }
+      });
+
+      /**
+       * タイトル編集入力：Enterで確定、Escapeで取消、blurで確定終了
+       */
+      el.sessionTitleInput?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          el.sessionTitleInput.blur();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          state.titleEditCancelled = true;
+          el.sessionTitleInput.blur();
+        }
+      });
+
+      el.sessionTitleInput?.addEventListener("blur", async () => {
+        const save = !state.titleEditCancelled;
+        state.titleEditCancelled = false;
+
+        el.sessionTitleInput.classList.add("is-hidden");
+        el.sessionTitleText.classList.remove("is-hidden");
+
+        if (!save) return;
+
+        const newTitle = el.sessionTitleInput.value.trim();
+
+        if (state.titleBarEntryId) {
+          if (newTitle !== (state.titleBarEntryTitle || "")) {
+            const updated = await updateHistoryTitle(
+              state.titleBarEntryId,
+              newTitle,
+            );
+            if (updated) setTitleBarEntry(updated);
+          }
+        } else {
+          // セッション未開始：下書きとしてのみ保持（開始時にエントリへ反映）
+          state.draftTitle = newTitle;
+          renderSessionTitleText(null);
+        }
+      });
+
+      /**
+       * 履歴に音声・画像も保存するかの設定トグル
+       */
+      el.saveMediaToggle?.addEventListener("change", () => {
+        setSaveMediaEnabled(el.saveMediaToggle.checked);
+      });
+
       // 初期化
-      initLanguageSelects();
-      updateApiKeyGateUI();
-      renderHistoryList();
+      (async function initApp() {
+        await migrateHistoryFromLocalStorageIfNeeded();
+        initLanguageSelects();
+        updateApiKeyGateUI();
+        await renderHistoryList();
+        if (el.saveMediaToggle) el.saveMediaToggle.checked = isSaveMediaEnabled();
+
+        // タイトルバーは毎回未開始状態（下書き空）で初期化する
+        setTitleBarEntry(null);
+      })();
     </script>
   </body>
 </html>
