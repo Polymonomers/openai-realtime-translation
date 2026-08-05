@@ -435,8 +435,11 @@
         cursor: text;
       }
 
+      /* 議事録は初期高さを控えめにし、右下コーナーで高さを伸縮できるようにする */
       .chatBox--report {
-        height: 130px;
+        height: 104px;
+        min-height: 64px;
+        resize: vertical;
       }
 
       /* =========================
@@ -447,6 +450,14 @@
         background: transparent;
         font-family: inherit;
         white-space: pre-wrap;
+        cursor: text;
+        flex: 1;
+      }
+
+      /* 議事録は見た目を変えずに編集する（編集中の枠線・背景を出さない） */
+      .reportOutput[contenteditable="true"] {
+        outline: none;
+        background: transparent;
       }
 
       .reportActions {
@@ -1179,7 +1190,11 @@
             <i class="fa-regular fa-copy" aria-hidden="true"></i>
           </button>
 
-          <pre id="reportOutput" class="chatBox__message reportOutput"></pre>
+          <pre
+            id="reportOutput"
+            class="chatBox__message reportOutput"
+            title="クリックして編集"
+          ></pre>
         </div>
       </div>
 
@@ -1191,7 +1206,7 @@
             <a
               id="infographicDownloadLink"
               href="#"
-              download="infographic.png"
+              download="image.png"
               class="textLink is-hidden"
             >
               <i class="fa-solid fa-download" aria-hidden="true"></i>
@@ -1430,7 +1445,7 @@
        * アプリの設定値
        */
       const CONFIG = {
-        TRANSCRIBE_MODEL: "gpt-realtime-whisper",
+        TRANSCRIBE_MODEL: "gpt-live-transcribe",
         TRANSLATE_RT_MODEL: "gpt-realtime-translate",
         REPORT_MODEL: "gpt-5.4-mini",
         AI_CLEAN_MODEL: "gpt-4.1-mini",
@@ -2108,12 +2123,14 @@
         el.reportOutput.textContent = "";
         el.reportDownloadLink.classList.add("is-hidden");
         el.reportDownloadLink.href = "#";
+        el.reportDownloadLink.download = "report.txt";
 
         // インフォグラフィックもリセット
         el.infographicImage.src = "";
         el.infographicImage.classList.add("is-hidden");
         el.infographicDownloadLink.classList.add("is-hidden");
         el.infographicDownloadLink.href = "#";
+        el.infographicDownloadLink.download = "image.png";
         el.infographicPlaceholder.textContent = "";
         el.infographicPlaceholder.classList.add("is-hidden");
         el.infographicBox.classList.add("is-empty");
@@ -3191,13 +3208,12 @@
         if (el.generateInfographicBtn?.disabled) return;
 
         const hasReport = !!(el.reportOutput.textContent || "").trim();
-        // 議事録未生成で発言もなければ中止
+        // 議事録未生成で、議事録の元になる内容（発言・メモ）もなければ中止
+        // ※判定は議事録生成が実際に使うテキスト（メモを含む）と揃える
         if (!hasReport) {
-          const transcript = getParagraphsTextWithoutComments(
-            el.transcriptContainer,
-          ).trim();
-          if (!transcript) {
-            alert("発言内容がありません。");
+          const reportSource = getParagraphsText(el.transcriptContainer).trim();
+          if (!reportSource) {
+            alert("発言内容・メモがありません。");
             return;
           }
         }
@@ -3229,7 +3245,7 @@
           el.infographicBox.classList.remove("is-empty");
 
           el.infographicDownloadLink.href = dataUrl;
-          el.infographicDownloadLink.download = `${buildFilenameBase("infographic")}_${Date.now()}.png`;
+          el.infographicDownloadLink.download = `${buildFilenameBase("image")}.png`;
           el.infographicDownloadLink.classList.remove("is-hidden");
 
           requestPersistHistorySnapshot({ debounceMs: 0 });
@@ -3838,6 +3854,11 @@
         setTitleBarEntry(entry);
         state.historyCurrentId = id;
 
+        // ファイル名は復元したタイトルに合わせる（タイトル確定後に設定する）
+        if (snap.media?.infographicDataUrl) {
+          el.infographicDownloadLink.download = `${buildFilenameBase("image")}.png`;
+        }
+
         closeHistoryDrawer();
       }
 
@@ -4174,6 +4195,91 @@
           );
         },
       );
+
+      /**
+       * 議事録本文をクリックで編集可能にする
+       * - 生成前でも直接入力できる
+       * - 編集確定（blur / Enter / Escで離脱）時にダウンロード用リンクと履歴を更新
+       */
+      function makeReportEditable(pre, clientX, clientY) {
+        if (!pre || pre.isContentEditable) return;
+
+        const original = pre.textContent;
+        state.editingContainer = el.reportBox;
+        pre.setAttribute("contenteditable", "true");
+        pre.focus({ preventScroll: true });
+
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+
+        let caretRange = null;
+        if (typeof clientX === "number" && typeof clientY === "number") {
+          if (document.caretRangeFromPoint) {
+            caretRange = document.caretRangeFromPoint(clientX, clientY);
+          } else if (document.caretPositionFromPoint) {
+            const pos = document.caretPositionFromPoint(clientX, clientY);
+            if (pos) {
+              caretRange = document.createRange();
+              caretRange.setStart(pos.offsetNode, pos.offset);
+            }
+          }
+        }
+
+        if (caretRange && pre.contains(caretRange.startContainer)) {
+          caretRange.collapse(true);
+          sel.addRange(caretRange);
+        } else {
+          const r = document.createRange();
+          r.selectNodeContents(pre);
+          r.collapse(false);
+          sel.addRange(r);
+        }
+
+        const finish = (revert) => {
+          state.editingContainer = null;
+          pre.removeAttribute("contenteditable");
+          pre.removeEventListener("blur", onBlur);
+          pre.removeEventListener("keydown", onKeydown);
+
+          if (revert) {
+            pre.textContent = original;
+            return;
+          }
+
+          if (pre.textContent === original) return;
+
+          // 生成済みのダウンロードリンクがあれば、編集後の本文で更新
+          if (!el.reportDownloadLink.classList.contains("is-hidden")) {
+            setReportDownloadLink(
+              `${buildFilenameBase("report")}.txt`,
+              buildReportDownloadText(pre.textContent),
+            );
+          }
+
+          requestPersistHistorySnapshot({ debounceMs: 0 });
+        };
+
+        const onBlur = () => finish(false);
+        const onKeydown = (e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            finish(true);
+            pre.blur();
+            return;
+          }
+          if (e.key === "Enter") {
+            e.preventDefault();
+            insertTextAtCaret("\n");
+          }
+        };
+
+        pre.addEventListener("blur", onBlur);
+        pre.addEventListener("keydown", onKeydown);
+      }
+
+      el.reportOutput.addEventListener("click", (e) => {
+        makeReportEditable(el.reportOutput, e.clientX, e.clientY);
+      });
 
       /**
        * 稼働中に翻訳先を変更したら、モード（文字起こし⇄翻訳）を切り替えるため再接続する
