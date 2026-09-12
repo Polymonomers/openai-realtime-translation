@@ -1447,8 +1447,8 @@
       const CONFIG = {
         TRANSCRIBE_MODEL: "gpt-live-transcribe",
         TRANSLATE_RT_MODEL: "gpt-realtime-translate",
-        REPORT_MODEL: "gpt-6-astra",
-        AI_CLEAN_MODEL: "gpt-5.6-luna",
+        REPORT_MODEL: "gpt-5.4-mini",
+        AI_CLEAN_MODEL: "gpt-4.1-mini",
         IMAGE_MODEL: "gpt-image-2.5-sunburst",
         // gpt-image-2 のサイズ制約：
         //   ・縦横それぞれ16の倍数
@@ -1467,8 +1467,6 @@
         MAX_SESSION_MS: 6 * 60 * 60 * 1000,
         AUTO_RECONNECT_IDLE_MS: 15 * 1000,
         HISTORY_MAX: 10,
-        // 停止/再開で分かれた録音を1本に結合する際のサンプリングレート（音声はモノラル16bit WAV）
-        AUDIO_MERGE_SAMPLE_RATE: 16000,
       };
 
       /**
@@ -1479,11 +1477,7 @@
         micStream: null,
         mediaRecorder: null, // 全体録音（音声DL用）
         recordedChunks: [],
-        // 停止のたびに1本の音声（セグメント）が確定する。
-        // 再開すると次のセグメントが追加され、DL時に1ファイルへ結合する。
-        audioSegments: [], // Blob[]（webm）
-        audioSegmentDataUrls: [], // 履歴保存用（設定ONの場合のみ）
-        audioExportBusy: false, // 結合DLの二重実行防止
+        lastAudioDataUrl: null, // 履歴保存用（設定ONの場合のみ）
         // Realtime WebSocket
         rtWs: null,
         rtAudioCtx: null,
@@ -1847,10 +1841,10 @@
         clearSessionLimitTimer();
 
         state.sessionStartedAt = Date.now();
-        state.sessionLimitTimerId = setTimeout(async () => {
+        state.sessionLimitTimerId = setTimeout(() => {
           if (!state.sessionRunning) return;
 
-          await stopSession();
+          stopSession();
 
           state.sessionRunning = false;
           updateSessionToggleUI(false);
@@ -2127,9 +2121,6 @@
         store.rtBuffer.clear();
         store.rtLivePara.clear();
 
-        // 停止中ならマイク/録音バッファも解放する（稼働中の扱いは呼び出し側）
-        if (!state.sessionRunning) releaseRecording();
-
         el.mediaDownloadLink.classList.add("is-hidden");
         el.mediaDownloadLink.href = "#";
 
@@ -2310,98 +2301,23 @@
           });
         }
 
-        // 全体録音（音声DLリンク用）。既存セグメントは残し、続きとして録音する
-        startRecorder();
+        // 全体録音（音声DLリンク用）
+        state.recordedChunks = [];
+        state.lastAudioDataUrl = null;
+        state.mediaRecorder = new MediaRecorder(state.micStream);
+        state.mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) state.recordedChunks.push(e.data);
+        };
+        state.mediaRecorder.start();
 
         // Realtime WebSocket 接続
         connectRealtimeWS(state.micStream);
       }
 
       /**
-       * 今回の録音セグメントを開始する（既存セグメントは保持＝続きから録音）
+       * セッション停止
        */
-      function startRecorder() {
-        state.recordedChunks = [];
-
-        state.mediaRecorder = new MediaRecorder(state.micStream);
-        state.mediaRecorder.ondataavailable = (e) => {
-          if (e.data.size > 0) state.recordedChunks.push(e.data);
-        };
-        state.mediaRecorder.start(1000);
-      }
-
-      /**
-       * 録音を停止して1セグメントとして確定する（マイク停止前に呼ぶこと）
-       * @returns {Promise<void>}
-       */
-      function stopRecorder() {
-        return new Promise((resolve) => {
-          const rec = state.mediaRecorder;
-          if (!rec || rec.state === "inactive") {
-            resolve();
-            return;
-          }
-          rec.onstop = () => {
-            state.mediaRecorder = null;
-            if (state.recordedChunks.length > 0) {
-              state.audioSegments.push(
-                new Blob(state.recordedChunks, { type: "audio/webm" }),
-              );
-            }
-            state.recordedChunks = [];
-            resolve();
-          };
-          try {
-            rec.stop();
-          } catch {
-            state.mediaRecorder = null;
-            resolve();
-          }
-        });
-      }
-
-      /**
-       * 録音済みセグメントの有無に応じて音声DLリンクの表示を更新する
-       */
-      function updateMediaDownloadLink() {
-        const has = state.audioSegments.length > 0;
-        el.mediaDownloadLink.classList.toggle("is-hidden", !has);
-      }
-
-      /**
-       * 録音セグメントを破棄する（録り直し用）
-       */
-      function discardRecordedAudio() {
-        state.recordedChunks = [];
-        state.audioSegments = [];
-        state.audioSegmentDataUrls = [];
-      }
-
-      /**
-       * マイクとレコーダーを解放し、録音も破棄する（消しゴム／履歴復元時）
-       */
-      function releaseRecording() {
-        if (state.mediaRecorder) {
-          state.mediaRecorder.ondataavailable = null;
-          state.mediaRecorder.onstop = null;
-          if (state.mediaRecorder.state !== "inactive") {
-            try {
-              state.mediaRecorder.stop();
-            } catch {}
-          }
-          state.mediaRecorder = null;
-        }
-
-        state.micStream?.getTracks().forEach((t) => t.stop());
-        state.micStream = null;
-
-        discardRecordedAudio();
-      }
-
-      /**
-       * セッション停止（録音を確定し、マイクは閉じる）
-       */
-      async function stopSession() {
+      function stopSession() {
         clearSessionLimitTimer();
 
         clearAutoReconnectTimer();
@@ -2409,125 +2325,27 @@
         // Realtime WebSocket を閉じる
         stopRealtimeWS();
 
-        // 録音を確定 → その後にマイクを閉じる（順序を逆にすると末尾が欠ける）
-        await stopRecorder();
+        // 全体録音停止 → DLリンク生成
+        if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") {
+          state.mediaRecorder.stop();
+          state.mediaRecorder.onstop = () => {
+            if (state.recordedChunks.length === 0) return;
+            const blob = new Blob(state.recordedChunks, { type: "audio/webm" });
+            state.recordedChunks = [];
+            el.mediaDownloadLink.href = URL.createObjectURL(blob);
+            el.mediaDownloadLink.classList.remove("is-hidden");
+
+            if (isSaveMediaEnabled()) {
+              blobToDataUrl(blob).then((dataUrl) => {
+                state.lastAudioDataUrl = dataUrl;
+                requestPersistHistorySnapshot({ debounceMs: 0 });
+              });
+            }
+          };
+        }
 
         state.micStream?.getTracks().forEach((t) => t.stop());
         state.micStream = null;
-
-        updateMediaDownloadLink();
-
-        if (isSaveMediaEnabled() && state.audioSegments.length > 0) {
-          const last = state.audioSegments[state.audioSegments.length - 1];
-          state.audioSegmentDataUrls = state.audioSegmentDataUrls.slice(
-            0,
-            state.audioSegments.length - 1,
-          );
-          state.audioSegmentDataUrls.push(await blobToDataUrl(last));
-          requestPersistHistorySnapshot({ debounceMs: 0 });
-        }
-      }
-
-      /* =========================
-        録音セグメントの結合（DL用）
-      ========================= */
-
-      /**
-       * Float32のPCMを16bit PCMのWAVへ変換する
-       * @param {Float32Array[]} parts
-       * @param {number} sampleRate
-       * @returns {Blob}
-       */
-      function encodeWav(parts, sampleRate) {
-        const total = parts.reduce((a, b) => a + b.length, 0);
-        const buffer = new ArrayBuffer(44 + total * 2);
-        const view = new DataView(buffer);
-
-        const writeStr = (offset, str) => {
-          for (let i = 0; i < str.length; i++)
-            view.setUint8(offset + i, str.charCodeAt(i));
-        };
-
-        writeStr(0, "RIFF");
-        view.setUint32(4, 36 + total * 2, true);
-        writeStr(8, "WAVE");
-        writeStr(12, "fmt ");
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true); // PCM
-        view.setUint16(22, 1, true); // mono
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * 2, true);
-        view.setUint16(32, 2, true);
-        view.setUint16(34, 16, true);
-        writeStr(36, "data");
-        view.setUint32(40, total * 2, true);
-
-        let offset = 44;
-        for (const part of parts) {
-          for (let i = 0; i < part.length; i++, offset += 2) {
-            const v = Math.max(-1, Math.min(1, part[i]));
-            view.setInt16(offset, v < 0 ? v * 0x8000 : v * 0x7fff, true);
-          }
-        }
-
-        return new Blob([buffer], { type: "audio/wav" });
-      }
-
-      /**
-       * 複数セグメントを1本のWAVへ結合する（webmの単純連結は再生できないため）
-       * @returns {Promise<Blob>}
-       */
-      async function mergeSegmentsToWav() {
-        const rate = CONFIG.AUDIO_MERGE_SAMPLE_RATE;
-        const parts = [];
-
-        for (const seg of state.audioSegments) {
-          const arrayBuffer = await seg.arrayBuffer();
-          // OfflineAudioContextでデコードすると、そのsampleRateへ変換される
-          const ctx = new OfflineAudioContext(1, 1, rate);
-          const decoded = await ctx.decodeAudioData(arrayBuffer);
-
-          if (decoded.numberOfChannels === 1) {
-            parts.push(decoded.getChannelData(0).slice());
-          } else {
-            const mixed = new Float32Array(decoded.length);
-            for (let c = 0; c < decoded.numberOfChannels; c++) {
-              const ch = decoded.getChannelData(c);
-              for (let i = 0; i < ch.length; i++) mixed[i] += ch[i];
-            }
-            for (let i = 0; i < mixed.length; i++)
-              mixed[i] /= decoded.numberOfChannels;
-            parts.push(mixed);
-          }
-        }
-
-        return encodeWav(parts, rate);
-      }
-
-      /**
-       * DL用の音声ファイルを作る。
-       * 1セグメントならwebmをそのまま、複数セグメントなら結合したWAVを返す。
-       * @returns {Promise<{blob: Blob, ext: string}>}
-       */
-      async function buildDownloadableAudio() {
-        if (state.audioSegments.length === 1) {
-          return { blob: state.audioSegments[0], ext: "webm" };
-        }
-        return { blob: await mergeSegmentsToWav(), ext: "wav" };
-      }
-
-      /**
-       * Blobをダウンロードさせる
-       */
-      function triggerBlobDownload(blob, filename) {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
       }
 
       /* =========================
@@ -3040,11 +2858,8 @@
       ========================= */
       /**
        * OpenAI Responsesのレスポンスから「テキスト部分」だけ抽出します。
-       * - output配列には reasoning など message 以外の要素も混ざるため、
-       *   先頭要素だけを見ずに全要素を走査する（推論系モデルでは output[0] が reasoning）
-       * - content要素は type:"output_text" のみを採用し、refusal等は除外する
-       * - `output_text` は公式SDKが付与する便宜プロパティで、素のHTTPレスポンスには
-       *   含まれないことがあるため「あれば使う」程度に留める
+       * - `output_text` があればそれを優先
+       * - なければ `output[0].content` を連結（fallback含む）
        * @param {any} data
        * @returns {string}
        */
@@ -3053,59 +2868,35 @@
           return data.output_text.trim();
         }
 
-        const output = Array.isArray(data?.output) ? data.output : [];
-        const texts = [];
+        const maybe =
+          data?.output?.[0]?.content
+            ?.map((c) => c?.text)
+            .filter(Boolean)
+            .join("") ||
+          data?.output?.[0]?.content?.[0]?.text ||
+          "";
 
-        for (const item of output) {
-          if (!item || !Array.isArray(item.content)) continue;
-          // reasoning アイテムには content が無い（summary のみ）ので自然に除外される
-          for (const part of item.content) {
-            if (!part) continue;
-            if (part.type && part.type !== "output_text") continue;
-            if (typeof part.text === "string") texts.push(part.text);
-          }
-        }
-
-        return texts.join("").trim();
-      }
-
-      /**
-       * 空応答だった場合の理由を推定してメッセージ化する（デバッグ用）
-       * @param {any} data
-       * @returns {string}
-       */
-      function describeEmptyOpenAIResponse(data) {
-        const reason = data?.incomplete_details?.reason;
-        if (data?.status === "incomplete" && reason) {
-          if (reason === "max_output_tokens") {
-            return "出力が上限に達して途中で打ち切られました（max_output_tokens）。";
-          }
-          return `応答が未完了です（${reason}）。`;
-        }
-
-        const output = Array.isArray(data?.output) ? data.output : [];
-        const refusal = output
-          .flatMap((item) => (Array.isArray(item?.content) ? item.content : []))
-          .find((part) => part?.type === "refusal");
-        if (refusal?.refusal) return `モデルが応答を拒否しました：${refusal.refusal}`;
-
-        if (output.length && output.every((item) => item?.type === "reasoning")) {
-          return "推論のみが返り、本文が生成されませんでした。";
-        }
-
-        return "";
+        return String(maybe || "").trim();
       }
 
       /**
        * OpenAI Responses API呼び出し（テキストのみ返す）
-       * @param {{ model: string, input: string, errorLabel: string }} params
+       * @param {{ model: string, input: string, temperature?: number, errorLabel: string }} params
        * @returns {Promise<string>}
        */
-      async function callOpenAIResponses({ model, input, errorLabel }) {
+      async function callOpenAIResponses({
+        model,
+        input,
+        temperature,
+        errorLabel,
+      }) {
         const body = {
           model,
           input,
         };
+
+        // 0は有効な値なので、`if (temperature)`ではなく型で判定する
+        if (typeof temperature === "number") body.temperature = temperature;
 
         const res = await fetch("https://api.openai.com/v1/responses", {
           method: "POST",
@@ -3122,16 +2913,7 @@
         }
 
         const data = await res.json();
-        const text = extractOpenAIResponseText(data);
-
-        if (!text) {
-          // 空応答は原因が分からないと手が打てないので、生データと推定理由を残す
-          console.warn(`${errorLabel}: empty response`, data);
-          const why = describeEmptyOpenAIResponse(data);
-          if (why) throw new Error(`${errorLabel}: ${why}`);
-        }
-
-        return text;
+        return extractOpenAIResponseText(data);
       }
 
       /* =========================
@@ -3185,6 +2967,7 @@
         return callOpenAIResponses({
           model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
           input: prompt,
+          temperature: 0,
           errorLabel: "OpenAI cleanup error",
         });
       }
@@ -3230,6 +3013,7 @@
         return callOpenAIResponses({
           model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
           input: prompt,
+          temperature: 0,
           errorLabel: "OpenAI incremental cleanup error",
         });
       }
@@ -3302,10 +3086,6 @@
        */
       async function generateReportCore() {
         const transcriptRaw = getParagraphsText(el.transcriptContainer);
-        if (!transcriptRaw) {
-          throw new Error("文字起こしが空のため、議事録を生成できません。");
-        }
-
         const prompt = buildReportPrompt(transcriptRaw);
 
         el.reportDownloadLink.classList.add("is-hidden");
@@ -3599,7 +3379,7 @@
           }
         } else {
           state.sessionRunning = false;
-          await stopSession();
+          stopSession();
 
           // 停止時点で、議事録は空のままテキストDLリンクを表示する
           setReportDownloadLink(
@@ -3664,12 +3444,8 @@
             if (!ok) return;
             clearConversationPanels();
 
-            if (state.sessionRunning) {
-              // 稼働中：マイクはそのままに、録音だけ最初から録り直す
-              discardRecordedAudio();
-              startRecorder();
-            } else {
-              // 停止中：以降は新規セッション扱い（現在の履歴/タイトルから切り離す）
+            // 稼働中でなければ、以降は新規セッション扱い（現在の履歴/タイトルから切り離す）
+            if (!state.sessionRunning) {
               state.historyCurrentId = null;
               setTitleBarEntry(null);
             }
@@ -3974,9 +3750,7 @@
             !el.infographicImage.classList.contains("is-hidden");
 
           snapshot.media = {
-            audioSegmentDataUrls: state.audioSegmentDataUrls.length
-              ? state.audioSegmentDataUrls
-              : null,
+            audioDataUrl: state.lastAudioDataUrl || null,
             infographicDataUrl: hasInfographic ? el.infographicImage.src : null,
           };
         }
@@ -3985,17 +3759,6 @@
       }
 
       async function beginHistorySession() {
-        // 停止→再開のときは既存エントリを引き継ぐ（タイトルを初期化しない）
-        if (state.historyCurrentId) {
-          const existing = await idbGetHistory(state.historyCurrentId);
-          if (existing) {
-            setTitleBarEntry(existing);
-            await renderHistoryList();
-            return;
-          }
-          state.historyCurrentId = null;
-        }
-
         const startedAt = Date.now();
         const id = String(startedAt);
 
@@ -4081,17 +3844,10 @@
 
         el.reportOutput.textContent = snap.reportText || "";
 
-        const savedAudioUrls =
-          snap.media?.audioSegmentDataUrls ||
-          (snap.media?.audioDataUrl ? [snap.media.audioDataUrl] : []);
-
-        if (savedAudioUrls.length) {
-          state.audioSegmentDataUrls = savedAudioUrls;
-          state.audioSegments = await Promise.all(
-            savedAudioUrls.map((u) => fetch(u).then((r) => r.blob())),
-          );
+        if (snap.media?.audioDataUrl) {
+          el.mediaDownloadLink.href = snap.media.audioDataUrl;
+          el.mediaDownloadLink.classList.remove("is-hidden");
         }
-        updateMediaDownloadLink();
 
         if (snap.media?.infographicDataUrl) {
           el.infographicImage.src = snap.media.infographicDataUrl;
@@ -4546,34 +4302,6 @@
       /**
        * タイトル表示テキスト：クリック（またはEnter/Space）で編集モードへ
        */
-      // 音声DL: 停止/再開で分かれたセグメントを1ファイルに結合してから保存する
-      el.mediaDownloadLink?.addEventListener("click", async (e) => {
-        e.preventDefault();
-        if (state.audioExportBusy || state.audioSegments.length === 0) return;
-
-        state.audioExportBusy = true;
-        const label = el.mediaDownloadLink.innerHTML;
-        el.mediaDownloadLink.innerHTML =
-          '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> 準備中';
-
-        try {
-          const { blob, ext } = await buildDownloadableAudio();
-          triggerBlobDownload(
-            blob,
-            `${buildFilenameBase("session_audio")}.${ext}`,
-          );
-        } catch (err) {
-          console.error(err);
-          alert(
-            "音声ファイルの作成に失敗しました。\n" +
-              (err?.message || String(err)),
-          );
-        } finally {
-          el.mediaDownloadLink.innerHTML = label;
-          state.audioExportBusy = false;
-        }
-      });
-
       el.sessionTitleText?.addEventListener("click", enterTitleEditMode);
       el.sessionTitleText?.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
