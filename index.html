@@ -3040,8 +3040,11 @@
       ========================= */
       /**
        * OpenAI Responsesのレスポンスから「テキスト部分」だけ抽出します。
-       * - `output_text` があればそれを優先
-       * - なければ `output[0].content` を連結（fallback含む）
+       * - output配列には reasoning など message 以外の要素も混ざるため、
+       *   先頭要素だけを見ずに全要素を走査する（推論系モデルでは output[0] が reasoning）
+       * - content要素は type:"output_text" のみを採用し、refusal等は除外する
+       * - `output_text` は公式SDKが付与する便宜プロパティで、素のHTTPレスポンスには
+       *   含まれないことがあるため「あれば使う」程度に留める
        * @param {any} data
        * @returns {string}
        */
@@ -3050,15 +3053,47 @@
           return data.output_text.trim();
         }
 
-        const maybe =
-          data?.output?.[0]?.content
-            ?.map((c) => c?.text)
-            .filter(Boolean)
-            .join("") ||
-          data?.output?.[0]?.content?.[0]?.text ||
-          "";
+        const output = Array.isArray(data?.output) ? data.output : [];
+        const texts = [];
 
-        return String(maybe || "").trim();
+        for (const item of output) {
+          if (!item || !Array.isArray(item.content)) continue;
+          // reasoning アイテムには content が無い（summary のみ）ので自然に除外される
+          for (const part of item.content) {
+            if (!part) continue;
+            if (part.type && part.type !== "output_text") continue;
+            if (typeof part.text === "string") texts.push(part.text);
+          }
+        }
+
+        return texts.join("").trim();
+      }
+
+      /**
+       * 空応答だった場合の理由を推定してメッセージ化する（デバッグ用）
+       * @param {any} data
+       * @returns {string}
+       */
+      function describeEmptyOpenAIResponse(data) {
+        const reason = data?.incomplete_details?.reason;
+        if (data?.status === "incomplete" && reason) {
+          if (reason === "max_output_tokens") {
+            return "出力が上限に達して途中で打ち切られました（max_output_tokens）。";
+          }
+          return `応答が未完了です（${reason}）。`;
+        }
+
+        const output = Array.isArray(data?.output) ? data.output : [];
+        const refusal = output
+          .flatMap((item) => (Array.isArray(item?.content) ? item.content : []))
+          .find((part) => part?.type === "refusal");
+        if (refusal?.refusal) return `モデルが応答を拒否しました：${refusal.refusal}`;
+
+        if (output.length && output.every((item) => item?.type === "reasoning")) {
+          return "推論のみが返り、本文が生成されませんでした。";
+        }
+
+        return "";
       }
 
       /**
@@ -3087,7 +3122,16 @@
         }
 
         const data = await res.json();
-        return extractOpenAIResponseText(data);
+        const text = extractOpenAIResponseText(data);
+
+        if (!text) {
+          // 空応答は原因が分からないと手が打てないので、生データと推定理由を残す
+          console.warn(`${errorLabel}: empty response`, data);
+          const why = describeEmptyOpenAIResponse(data);
+          if (why) throw new Error(`${errorLabel}: ${why}`);
+        }
+
+        return text;
       }
 
       /* =========================
@@ -3258,6 +3302,10 @@
        */
       async function generateReportCore() {
         const transcriptRaw = getParagraphsText(el.transcriptContainer);
+        if (!transcriptRaw) {
+          throw new Error("文字起こしが空のため、議事録を生成できません。");
+        }
+
         const prompt = buildReportPrompt(transcriptRaw);
 
         el.reportDownloadLink.classList.add("is-hidden");
