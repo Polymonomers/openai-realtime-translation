@@ -3063,22 +3063,14 @@
 
       /**
        * OpenAI Responses API呼び出し（テキストのみ返す）
-       * @param {{ model: string, input: string, temperature?: number, errorLabel: string }} params
+       * @param {{ model: string, input: string, errorLabel: string }} params
        * @returns {Promise<string>}
        */
-      async function callOpenAIResponses({
-        model,
-        input,
-        temperature,
-        errorLabel,
-      }) {
+      async function callOpenAIResponses({ model, input, errorLabel }) {
         const body = {
           model,
           input,
         };
-
-        // 0は有効な値なので、`if (temperature)`ではなく型で判定する
-        if (typeof temperature === "number") body.temperature = temperature;
 
         const res = await fetch("https://api.openai.com/v1/responses", {
           method: "POST",
@@ -3149,7 +3141,6 @@
         return callOpenAIResponses({
           model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
           input: prompt,
-          temperature: 0,
           errorLabel: "OpenAI cleanup error",
         });
       }
@@ -3195,7 +3186,6 @@
         return callOpenAIResponses({
           model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
           input: prompt,
-          temperature: 0,
           errorLabel: "OpenAI incremental cleanup error",
         });
       }
