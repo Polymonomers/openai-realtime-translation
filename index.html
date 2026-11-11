@@ -344,7 +344,6 @@
         box-sizing: border-box;
         padding: 0 26px 0 10px;
         width: 120px;
-        font-size: var(--control-font);
         line-height: 1.4;
         color: #111;
         border: 1px solid var(--color-border);
@@ -381,6 +380,27 @@
         font-size: 16px;
         font-weight: 500;
         padding: 6px 10px;
+      }
+
+      .audioLinks {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        white-space: nowrap;
+      }
+
+      .audioLinks:empty {
+        display: none;
+      }
+
+      .rtStatus {
+        flex: 1;
+        min-width: 0;
+        font-size: 12px;
+        color: #c0392b;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       #sessionToggleBtn.recording {
@@ -975,15 +995,10 @@
             <i class="fa-solid fa-scissors" aria-hidden="true"></i>
           </button>
 
-          <a
-            id="mediaDownloadLink"
-            href="#"
-            download="session_audio.webm"
-            class="textLink is-hidden"
-          >
-            <i class="fa-solid fa-download" aria-hidden="true"></i>
-            音声
-          </a>
+          <!-- 音声DLリンク（JSで描画。復元後に録音を続けた場合は「音声1」「音声2」と並ぶ） -->
+          <span id="audioLinks" class="audioLinks"></span>
+
+          <span id="rtStatus" class="rtStatus is-hidden" role="status"></span>
         </div>
         <button
           id="clearAllBtn"
@@ -1467,6 +1482,10 @@
         MAX_SESSION_MS: 6 * 60 * 60 * 1000,
         AUTO_RECONNECT_IDLE_MS: 15 * 1000,
         HISTORY_MAX: 20,
+        // 停止時、直前の発言の文字起こしが届くのを待つ時間
+        STOP_DRAIN_MS: 2500,
+        // 再接続中に溜めておく音声の上限（チャンク数。約20秒分）
+        RT_QUEUE_MAX_CHUNKS: 120,
       };
 
       /**
@@ -1477,7 +1496,24 @@
         micStream: null,
         mediaRecorder: null, // 全体録音（音声DL用）
         recordedChunks: [],
-        lastAudioDataUrl: null, // 履歴保存用（設定ONの場合のみ）
+        lastAudio: null, // 今回の録音（Blob）
+        // 履歴を復元する前に録音済みだった音声（Blob。旧形式の履歴は data URL 文字列）。
+        // WebM同士は後から1本に繋げられないため、別ファイルとして残す。
+        priorAudio: [],
+        audioUnsaved: false, // 履歴に保存されず、まだダウンロードもされていない録音があるか
+        pcmQueue: [], // 接続が開くまでの間に溜めておく送信待ち音声（base64）
+        // 最後の文字起こし/翻訳の後に、OpenAI側が発話を検知した時刻（0=未検知）
+        // ※こちらでは音量判定をせず、サーバーのイベントだけで判断する
+        transcriptVoiceAt: 0,
+        translationVoiceAt: 0,
+        // 停止後、直前の発言の文字起こしを待っている接続
+        rtDrainingWs: null,
+        rtDrainTimerId: null,
+        // 録音を停止/開始をまたいで1本に繋げるための中継（マイク → recDest → MediaRecorder）
+        recAudioCtx: null,
+        recDest: null,
+        recSource: null,
+        audioFlushPending: false,
         // Realtime WebSocket
         rtWs: null,
         rtAudioCtx: null,
@@ -1495,7 +1531,10 @@
         draftTitle: "", // セッション開始前に入力された下書きタイトル
         titleEditCancelled: false,
         // AI要約関連
-        aiSummaryLastProcessedLength: 0,
+        aiSummaryInFlight: false,
+        // Realtime接続エラー管理
+        rtConnectFailCount: 0,
+        rtLastError: "",
         // 自動再接続
         autoReconnectTimerId: null,
         autoReconnectTimerId2: null,
@@ -1590,7 +1629,12 @@
           "none",
         );
 
-        buildLangSelect(document.getElementById("aiLang"), core, "ja");
+        // 要約は既定で「なし」（言語を選んだときだけAI要約を実行する）
+        buildLangSelect(
+          document.getElementById("aiLang"),
+          ["none", ...core],
+          "none",
+        );
       }
 
       /* =========================
@@ -1604,7 +1648,7 @@
         sessionToggleBtn: document.getElementById("sessionToggleBtn"),
         forceSilenceBtn: document.getElementById("forceSilenceBtn"),
         reconnectBtn: document.getElementById("reconnectBtn"),
-        mediaDownloadLink: document.getElementById("mediaDownloadLink"),
+        audioLinks: document.getElementById("audioLinks"),
         sessionTitleText: document.getElementById("sessionTitleText"),
         sessionTitleInput: document.getElementById("sessionTitleInput"),
 
@@ -1784,16 +1828,6 @@
       }
 
       /**
-       * 文字起こし用の段落をDOMから外し、store から除去する
-       * @param {string} itemId
-       */
-      function removeUserSpeechParagraph(itemId) {
-        const p = store.userSpeech.get(itemId);
-        if (p?.parentNode) p.remove();
-        store.userSpeech.delete(itemId);
-      }
-
-      /**
        * コメント一覧を作る（重複しないよう store.userSpeech の manual_ を採用）
        * @returns {string}
        */
@@ -1816,7 +1850,15 @@
         if (!state.rtWs || state.rtWs.readyState !== WebSocket.OPEN) return;
         // 翻訳セッションは連続処理のためcommit非対応
         if (state.rtMode === "translation") return;
-        state.rtWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        sendAudioCommit(state.rtWs);
+      }
+
+      /**
+       * 送信済みの音声をここで区切って確定させる（文字起こしモード用）
+       * @param {WebSocket} ws
+       */
+      function sendAudioCommit(ws) {
+        ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
       }
 
       /**
@@ -1834,6 +1876,9 @@
         }, ms);
       }
 
+      /* =========================
+        Session limit timer
+      ========================= */
       /**
        * セッションタイマー開始
        */
@@ -1844,14 +1889,32 @@
         state.sessionLimitTimerId = setTimeout(() => {
           if (!state.sessionRunning) return;
 
-          stopSession();
-
-          state.sessionRunning = false;
-          updateSessionToggleUI(false);
-          updateRealtimeButtons();
+          // 手動停止と同じ処理（履歴の最終保存・DLリンク表示を含む）
+          haltSession();
 
           alert("セッションは最大6時間のため、自動的に停止しました。");
         }, CONFIG.MAX_SESSION_MS);
+      }
+
+      /**
+       * セッションタイマー初期化
+       */
+      function clearSessionLimitTimer() {
+        if (state.sessionLimitTimerId) {
+          clearTimeout(state.sessionLimitTimerId);
+          state.sessionLimitTimerId = null;
+        }
+      }
+
+      /* =========================
+        Auto reconnect (watchdog)
+      ========================= */
+      /**
+       * 接続を張り直す（音声の取り込みは止めない）
+       */
+      function reconnectRealtime() {
+        stopRealtimeWS();
+        connectRealtimeWS();
       }
 
       /**
@@ -1862,8 +1925,7 @@
         if (!state.sessionRunning || !state.micStream) return;
         clearAutoReconnectTimer();
         console.log("[RT] auto-reconnect:", reason);
-        stopRealtimeWS();
-        connectRealtimeWS(state.micStream);
+        reconnectRealtime();
         startAutoReconnectWatchdogs();
       }
 
@@ -1871,26 +1933,76 @@
        * 文字起こし（原文）ウォッチドッグ：一定時間 文字起こしが止まれば再接続
        */
       function resetTranscriptWatchdog() {
-        if (state.autoReconnectTimerId)
-          clearTimeout(state.autoReconnectTimerId);
+        state.transcriptVoiceAt = 0;
+        armIdleWatchdog(
+          "autoReconnectTimerId",
+          "transcriptVoiceAt",
+          "transcript idle",
+        );
+      }
+
+      /**
+       * アイドル監視タイマーを仕掛ける
+       * - 発話の有無は OpenAI 側の検知（speech_started / speech_stopped、
+       *   翻訳の場合は原文の文字起こし）だけで判断し、こちらでは音声を解析しない
+       * - 発話が検知されていない（無音が続いているだけ）の間は再接続しない
+       * - 発話が検知されてから一定時間たっても結果が届かないときだけ再接続する
+       * - 発話検知イベントを出さない接続（翻訳モードの原文側）は、
+       *   従来どおり一定時間結果が届かなければ再接続する
+       * @param {string} timerKey state上のタイマーIDのキー
+       * @param {string} voiceKey state上の「発話検知時刻」のキー
+       * @param {string} reason ログ用
+       * @param {number} delay
+       */
+      function armIdleWatchdog(
+        timerKey,
+        voiceKey,
+        reason,
+        delay = CONFIG.AUTO_RECONNECT_IDLE_MS,
+      ) {
+        if (state[timerKey]) clearTimeout(state[timerKey]);
+        state[timerKey] = null;
         if (!state.sessionRunning) return;
-        state.autoReconnectTimerId = setTimeout(() => {
-          state.autoReconnectTimerId = null;
-          triggerAutoReconnect("transcript idle");
-        }, CONFIG.AUTO_RECONNECT_IDLE_MS);
+
+        state[timerKey] = setTimeout(() => {
+          state[timerKey] = null;
+          const voiceAt = state[voiceKey];
+          // 発話通知を受け取った実績のあるモードだけ「無音なら再接続しない」を使う。
+          // 実績がない間は従来どおり、一定時間結果が無ければ再接続する。
+          const canDetectVoice =
+            voiceKey === "translationVoiceAt" || hasVadSupport(state.rtMode);
+          if (!canDetectVoice) {
+            triggerAutoReconnect(reason);
+            return;
+          }
+          if (!voiceAt) {
+            armIdleWatchdog(timerKey, voiceKey, reason);
+            return;
+          }
+          const waited = Date.now() - voiceAt;
+          if (waited < CONFIG.AUTO_RECONNECT_IDLE_MS) {
+            armIdleWatchdog(
+              timerKey,
+              voiceKey,
+              reason,
+              CONFIG.AUTO_RECONNECT_IDLE_MS - waited,
+            );
+            return;
+          }
+          triggerAutoReconnect(reason);
+        }, delay);
       }
 
       /**
        * 翻訳ウォッチドッグ：翻訳モード時、一定時間 翻訳が止まれば再接続
        */
       function resetTranslationWatchdog() {
-        if (state.autoReconnectTimerId2)
-          clearTimeout(state.autoReconnectTimerId2);
-        if (!state.sessionRunning) return;
-        state.autoReconnectTimerId2 = setTimeout(() => {
-          state.autoReconnectTimerId2 = null;
-          triggerAutoReconnect("translation idle");
-        }, CONFIG.AUTO_RECONNECT_IDLE_MS);
+        state.translationVoiceAt = 0;
+        armIdleWatchdog(
+          "autoReconnectTimerId2",
+          "translationVoiceAt",
+          "translation idle",
+        );
       }
 
       /**
@@ -1918,16 +2030,6 @@
         }
       }
 
-      /**
-       * セッションタイマー初期化
-       */
-      function clearSessionLimitTimer() {
-        if (state.sessionLimitTimerId) {
-          clearTimeout(state.sessionLimitTimerId);
-          state.sessionLimitTimerId = null;
-        }
-      }
-
       /* =========================
         API Key (localStorage)
       ========================= */
@@ -1936,7 +2038,23 @@
         HISTORY: "transreport_history_v1",
         DICTIONARY: "transreport_dictionary_v1",
         SAVE_MEDIA: "transreport_save_media_v1",
+        VAD_SEEN_PREFIX: "transreport_vad_seen_v1_",
       };
+
+      /**
+       * そのモード（transcription / translation）で、OpenAI側の発話通知を
+       * 受け取った実績があるか。一度受け取れば次回以降も覚えておく。
+       */
+      function hasVadSupport(mode) {
+        return (
+          localStorage.getItem(STORAGE_KEYS.VAD_SEEN_PREFIX + mode) === "1"
+        );
+      }
+
+      function markVadSupport(mode) {
+        if (hasVadSupport(mode)) return;
+        localStorage.setItem(STORAGE_KEYS.VAD_SEEN_PREFIX + mode, "1");
+      }
 
       function loadApiKey() {
         return (localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY) || "").trim();
@@ -1959,20 +2077,6 @@
 
       function setSaveMediaEnabled(enabled) {
         localStorage.setItem(STORAGE_KEYS.SAVE_MEDIA, enabled ? "1" : "0");
-      }
-
-      /**
-       * Blob を base64 data URL に変換する
-       * @param {Blob} blob
-       * @returns {Promise<string>}
-       */
-      function blobToDataUrl(blob) {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
       }
 
       /* =========================
@@ -2108,6 +2212,13 @@
        * 文字起こし・翻訳・AI回答の表示と内部Mapをまとめてクリア
        */
       function clearConversationPanels() {
+        // 停止直後の待機中の接続があれば破棄（消去後の画面に追記されないようにする）
+        finishRealtimeDrain(false);
+        store.rtTransInBuf = "";
+        store.rtTransInLive = null;
+        store.rtTransOutBuf = "";
+        store.rtTransOutLive = null;
+
         const containers = [
           { el: el.transcriptContainer, map: store.userSpeech },
           { el: el.translationContainer, map: store.translation },
@@ -2120,9 +2231,6 @@
         }
         store.rtBuffer.clear();
         store.rtLivePara.clear();
-
-        el.mediaDownloadLink.classList.add("is-hidden");
-        el.mediaDownloadLink.href = "#";
 
         el.textInput.value = "";
         autoResizeTextarea(el.textInput);
@@ -2141,8 +2249,6 @@
         el.infographicPlaceholder.textContent = "";
         el.infographicPlaceholder.classList.add("is-hidden");
         el.infographicBox.classList.add("is-empty");
-
-        state.aiSummaryLastProcessedLength = 0;
       }
 
       /* =========================
@@ -2161,16 +2267,7 @@
           .map((p) => p.innerText)
           .join("\n");
 
-        navigator.clipboard
-          .writeText(text)
-          .then(() =>
-            setTempButtonLabel(
-              button,
-              '<i class="fa-solid fa-check" aria-hidden="true"></i>',
-              1000,
-            ),
-          )
-          .catch(console.error);
+        copyTextToClipboard(text, button);
       }
 
       /**
@@ -2202,16 +2299,7 @@
           }
         });
 
-        navigator.clipboard
-          .writeText(memos.join("\n"))
-          .then(() =>
-            setTempButtonLabel(
-              el.getMemosBtn,
-              '<i class="fa-solid fa-check" aria-hidden="true"></i>',
-              1000,
-            ),
-          )
-          .catch(console.error);
+        copyTextToClipboard(memos.join("\n"), el.getMemosBtn);
       }
 
       /* =========================
@@ -2242,28 +2330,6 @@
       /* =========================
         Prompt
       ========================= */
-      /**
-       * 文字起こし結果を整形するプロンプト
-       * @param {string} text
-       * @returns {string}
-       */
-      function buildCleanupPrompt(text) {
-        const targetInfo = getLangInfo(el.aiLangSelect?.value || "ja");
-        const targetLangEn = targetInfo.en;
-        return [
-          "You are a transcription cleaner.",
-          `Clean up and slightly edit the following transcript so that it is natural and easy to read in ${targetLangEn}.`,
-          "If there is repetition or filler, you may summarize and condense while keeping all key information and decisions.",
-          "Fix obvious recognition errors and unclear parts based on context without changing the original meaning.",
-          "Add appropriate punctuation and spacing.",
-          `Always output in ${targetLangEn}, regardless of the source language.`,
-          "Do not add explanations, meta comments, or acknowledgements such as '承知しました'.",
-          "",
-          "TRANSCRIPT:",
-          text,
-        ].join("\n");
-      }
-
       function buildReportPrompt(transcript, summary) {
         return `
           #命令
@@ -2301,17 +2367,187 @@
           });
         }
 
-        // 全体録音（音声DLリンク用）
-        state.recordedChunks = [];
-        state.lastAudioDataUrl = null;
-        state.mediaRecorder = new MediaRecorder(state.micStream);
-        state.mediaRecorder.ondataavailable = (e) => {
-          if (e.data.size > 0) state.recordedChunks.push(e.data);
-        };
-        state.mediaRecorder.start();
+        // 送信用の音声取り込みは接続より先に始め、再接続をまたいで動かし続ける
+        // （接続が開くまでの音声は溜めておき、開いたらまとめて送る）
+        await startPcmCapture(state.micStream);
+
+        await startRecording(state.micStream);
 
         // Realtime WebSocket 接続
-        connectRealtimeWS(state.micStream);
+        connectRealtimeWS();
+      }
+
+      /**
+       * 全体録音（音声DLリンク用）を開始/再開する
+       * 停止→開始では録音を作り直さず、一時停止していた録音を再開して前の音声に続ける。
+       * （マイクは停止のたびに解放するため、AudioContext で中継して録音側のストリームを維持する）
+       * @param {MediaStream} stream
+       */
+      async function startRecording(stream) {
+        if (!state.mediaRecorder || state.mediaRecorder.state === "inactive") {
+          detachRecording();
+          state.recAudioCtx = new AudioContext();
+          state.recDest = state.recAudioCtx.createMediaStreamDestination();
+          // 音質（ビットレート）はブラウザ既定のまま
+          state.mediaRecorder = new MediaRecorder(state.recDest.stream);
+          state.mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) state.recordedChunks.push(e.data);
+            if (state.audioFlushPending) {
+              state.audioFlushPending = false;
+              updateAudioDownloadLink();
+            }
+          };
+        }
+        state.audioFlushPending = false;
+        await state.recAudioCtx.resume();
+        state.recSource = state.recAudioCtx.createMediaStreamSource(stream);
+        state.recSource.connect(state.recDest);
+        if (state.mediaRecorder.state === "inactive") {
+          state.mediaRecorder.start();
+        } else if (state.mediaRecorder.state === "paused") {
+          state.mediaRecorder.resume();
+        }
+      }
+
+      /**
+       * ここまでの録音全体からDLリンク（と履歴用データ）を作り直す
+       */
+      function updateAudioDownloadLink() {
+        if (state.recordedChunks.length === 0) return;
+        state.lastAudio = new Blob(state.recordedChunks, {
+          type: state.mediaRecorder?.mimeType || "audio/webm",
+        });
+        state.audioUnsaved = !isSaveMediaEnabled();
+        renderAudioLinks();
+        saveMediaForCurrent();
+      }
+
+      /**
+       * 音声DLリンクを描画する
+       * - 通常は「音声」1つ
+       * - 履歴を復元してから録音を続けた場合は、以前の音声と今回の音声を
+       *   「音声1」「音声2」…として並べる（どちらも失われない）
+       * - ファイル名はクリックした時点のタイトルで付ける
+       */
+      function renderAudioLinks() {
+        const box = el.audioLinks;
+        if (!box) return;
+
+        box.querySelectorAll("a").forEach((a) => {
+          if (a.href.startsWith("blob:")) URL.revokeObjectURL(a.href);
+        });
+        box.innerHTML = "";
+
+        const segments = [...state.priorAudio, state.lastAudio].filter(Boolean);
+        segments.forEach((seg, i) => {
+          const suffix = segments.length > 1 ? String(i + 1) : "";
+          const a = document.createElement("a");
+          a.className = "textLink";
+          a.href = typeof seg === "string" ? seg : URL.createObjectURL(seg);
+          a.download = "session_audio.webm";
+          a.innerHTML = `<i class="fa-solid fa-download" aria-hidden="true"></i>音声${suffix}`;
+          a.addEventListener("click", () => {
+            const type = typeof seg === "string" ? seg.slice(0, 40) : seg.type;
+            const ext = (type || "").includes("mp4") ? "mp4" : "webm";
+            const base = buildFilenameBase("session_audio");
+            a.download = `${base}${suffix ? "_" + suffix : ""}.${ext}`;
+            if (seg === state.lastAudio) state.audioUnsaved = false;
+          });
+          box.appendChild(a);
+        });
+      }
+
+      /**
+       * 現在の録音を state から切り離して終了する
+       * @param {(blob: Blob|null) => void} [onDone] 録音全体を受け取る（省略時は破棄）
+       */
+      function detachRecording(onDone) {
+        const rec = state.mediaRecorder;
+        const chunks = state.recordedChunks;
+        const ctx = state.recAudioCtx;
+        const src = state.recSource;
+
+        state.mediaRecorder = null;
+        state.recordedChunks = [];
+        state.recAudioCtx = null;
+        state.recDest = null;
+        state.recSource = null;
+        state.lastAudio = null;
+        state.audioFlushPending = false;
+        state.audioUnsaved = false;
+
+        const cleanup = () => {
+          try {
+            src?.disconnect();
+          } catch {}
+          ctx?.close().catch(() => {});
+        };
+
+        if (!rec || rec.state === "inactive") {
+          cleanup();
+          onDone?.(null);
+          return;
+        }
+
+        rec.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
+        };
+        rec.onstop = () => {
+          cleanup();
+          onDone?.(
+            chunks.length
+              ? new Blob(chunks, { type: rec.mimeType || "audio/webm" })
+              : null,
+          );
+        };
+        try {
+          rec.stop();
+        } catch {
+          cleanup();
+          onDone?.(null);
+        }
+      }
+
+      /**
+       * 録音を破棄する（消しゴム・履歴復元など、別の議題に切り替わるとき）
+       */
+      function resetRecording() {
+        detachRecording();
+        state.priorAudio = [];
+        renderAudioLinks();
+      }
+
+      /**
+       * 録音中の消しゴム：録音を止めずに新しい議題へ切り替える
+       * - ここまでの内容（と、設定ONなら音声・画像）を今の履歴に保存
+       * - 画面・タイトル・録音を新しくして、新しい履歴で続ける
+       */
+      async function rotateToNewSession() {
+        const oldId = state.historyCurrentId;
+        await persistHistoryNow();
+
+        const infographicDataUrl = getInfographicDataUrl();
+        const priorAudio = state.priorAudio.slice();
+        const saveOn = isSaveMediaEnabled();
+
+        detachRecording((blob) => {
+          if (!saveOn || !oldId) return;
+          idbPutMedia({
+            id: oldId,
+            audio: blob,
+            priorAudio,
+            infographicDataUrl,
+          }).catch(console.error);
+        });
+        state.priorAudio = [];
+        renderAudioLinks();
+
+        clearConversationPanels();
+        state.historyCurrentId = null;
+        setTitleBarEntry(null);
+
+        if (state.micStream) await startRecording(state.micStream);
+        await beginHistorySession();
       }
 
       /**
@@ -2322,27 +2558,22 @@
 
         clearAutoReconnectTimer();
 
-        // Realtime WebSocket を閉じる
-        stopRealtimeWS();
+        // Realtime WebSocket を閉じる（直前の発言の文字起こしを少し待ってから）
+        closeRealtimeGracefully();
 
-        // 全体録音停止 → DLリンク生成
-        if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") {
-          state.mediaRecorder.stop();
-          state.mediaRecorder.onstop = () => {
-            if (state.recordedChunks.length === 0) return;
-            const blob = new Blob(state.recordedChunks, { type: "audio/webm" });
-            state.recordedChunks = [];
-            el.mediaDownloadLink.href = URL.createObjectURL(blob);
-            el.mediaDownloadLink.classList.remove("is-hidden");
-
-            if (isSaveMediaEnabled()) {
-              blobToDataUrl(blob).then((dataUrl) => {
-                state.lastAudioDataUrl = dataUrl;
-                requestPersistHistorySnapshot({ debounceMs: 0 });
-              });
-            }
-          };
+        // 全体録音は「一時停止」にとどめ、ここまでの音声でDLリンクを生成する
+        // （次の開始で同じ録音に続きを追加するため、録音データは破棄しない）
+        const rec = state.mediaRecorder;
+        if (rec && rec.state === "recording") {
+          state.audioFlushPending = true;
+          rec.requestData();
+          rec.pause();
+        } else if (rec && rec.state === "paused") {
+          updateAudioDownloadLink();
         }
+        state.recSource?.disconnect();
+        state.recSource = null;
+        state.recAudioCtx?.suspend().catch(() => {});
 
         state.micStream?.getTracks().forEach((t) => t.stop());
         state.micStream = null;
@@ -2352,8 +2583,11 @@
         Realtime WebSocket
       ========================= */
 
-      function connectRealtimeWS(stream) {
+      function connectRealtimeWS() {
         const apiKey = getApiKeyOrThrow();
+        state.rtLastError = "";
+        // 停止直後の待機中の接続が残っていれば、届いた分を確定して閉じる
+        if (state.rtDrainingWs) finishRealtimeDrain(true);
 
         // 翻訳先が指定されていれば翻訳セッション（gpt-realtime-translate）を使う
         const translateOn =
@@ -2369,6 +2603,7 @@
         state.rtWs = ws;
 
         ws.onopen = async () => {
+          ws._openedAt = Date.now();
           console.log("[RT] connected:", state.rtMode);
           const lang = el.transcriptLangSelect?.value || "auto";
 
@@ -2413,26 +2648,106 @@
             );
           }
 
-          await startPcmCapture(stream);
+          // 設定を送ったら、接続待ちの間に溜めていた音声から送信を始める
+          ws._ready = true;
+          flushPcmQueue();
         };
 
         ws.onmessage = (e) => {
           const ev = JSON.parse(e.data);
+          if (ev.type === "error") {
+            state.rtLastError = ev.error?.message || ev.error?.code || "";
+          } else if (/speech_(started|stopped)$/.test(ev.type || "")) {
+            // OpenAI側の発話検知。話し終えた時点から結果待ちの時間を数える
+            markVadSupport(state.rtMode);
+            const now = Date.now();
+            const stopped = ev.type.endsWith("speech_stopped");
+            if (stopped || !state.transcriptVoiceAt)
+              state.transcriptVoiceAt = now;
+            if (stopped || !state.translationVoiceAt)
+              state.translationVoiceAt = now;
+          } else if (
+            !ws._gotTranscript &&
+            ev.delta &&
+            /transcript/.test(ev.type || "")
+          ) {
+            // 文字起こしが届いた＝正常に動作している
+            ws._gotTranscript = true;
+            state.rtConnectFailCount = 0;
+            setRtStatus("");
+          }
           if (state.rtMode === "translation") handleTranslationEvent(ev);
           else handleRealtimeEvent(ev);
         };
         ws.onerror = (e) => console.error("[RT] error", e);
         ws.onclose = (e) => {
           console.log("[RT] closed", e.code, e.reason);
-          if (state.rtWs === ws) {
-            stopPcmCapture();
-            state.rtWs = null;
-          }
+          // stopRealtimeWS() で自分から閉じた場合は state.rtWs が既に別物/null
+          if (state.rtWs !== ws) return;
+          state.rtWs = null;
+          handleUnexpectedRtClose(ws, e);
         };
       }
 
+      /**
+       * 接続状態メッセージ（開始ボタン横）を表示/消去する
+       * @param {string} text 空文字で非表示
+       */
+      function setRtStatus(text) {
+        const statusEl = document.getElementById("rtStatus");
+        if (!statusEl) return;
+        statusEl.textContent = text || "";
+        statusEl.title = text || "";
+        statusEl.classList.toggle("is-hidden", !text);
+      }
+
+      /**
+       * サーバー側・ネットワーク起因で接続が切れたときの処理
+       * - 画面に状況を表示して1秒後に再接続
+       * - 正常に動かないまま3回続けて切れたら、停止して理由を知らせる
+       *   （APIキー無効・利用上限などで再接続を繰り返し続けるのを防ぐ）
+       */
+      function handleUnexpectedRtClose(ws, e) {
+        if (!state.sessionRunning) return;
+
+        const healthy =
+          ws._gotTranscript ||
+          (ws._openedAt && Date.now() - ws._openedAt >= 5000);
+        state.rtConnectFailCount = healthy ? 0 : state.rtConnectFailCount + 1;
+
+        const detail =
+          state.rtLastError ||
+          e.reason ||
+          (ws._openedAt
+            ? ""
+            : "接続できませんでした（APIキー・ネットワークを確認してください）");
+
+        if (state.rtConnectFailCount >= 3) {
+          haltSession();
+          alert(
+            "音声認識サーバーに接続できないため停止しました。\n" + detail,
+          );
+          return;
+        }
+
+        setRtStatus(
+          "接続が切れました。再接続中…" + (detail ? ` (${detail})` : ""),
+        );
+        setTimeout(() => {
+          if (!state.sessionRunning || state.rtWs) return;
+          try {
+            triggerAutoReconnect("ws closed");
+          } catch (err) {
+            console.error(err);
+          }
+        }, 1000);
+      }
+
+      /**
+       * 接続だけを閉じる（再接続用）。音声の取り込みは止めず、
+       * 次の接続が開くまでの音声は溜めておく。
+       */
       function stopRealtimeWS() {
-        stopPcmCapture();
         if (state.rtWs) {
           state.rtWs.close();
           state.rtWs = null;
@@ -2446,6 +2761,74 @@
         store.rtTransOutLive = null;
       }
 
+      /**
+       * 停止時のクローズ：音声送信を止め、直前の発言の文字起こしが届くのを
+       * 少し待ってから接続を閉じる（停止直前の発言が欠けるのを防ぐ）
+       */
+      function closeRealtimeGracefully() {
+        const ws = state.rtWs;
+        stopPcmCapture();
+        state.rtWs = null;
+        state.isSpeaking = false;
+        if (!ws) return;
+
+        if (ws.readyState !== WebSocket.OPEN) {
+          try {
+            ws.close();
+          } catch {}
+          flushPendingRealtimeText();
+          return;
+        }
+
+        // 文字起こしモードは、送信済みの音声を確定させる（翻訳モードは連続処理のため不要）
+        if (state.rtMode === "transcription") {
+          try {
+            sendAudioCommit(ws);
+          } catch {}
+        }
+
+        state.rtDrainingWs = ws;
+        state.rtDrainTimerId = setTimeout(
+          () => finishRealtimeDrain(true),
+          CONFIG.STOP_DRAIN_MS,
+        );
+      }
+
+      /**
+       * 停止後の待機を終えて接続を閉じる
+       * @param {boolean} flush true: 未確定テキストを確定して残す / false: 破棄
+       */
+      function finishRealtimeDrain(flush) {
+        if (state.rtDrainTimerId) clearTimeout(state.rtDrainTimerId);
+        state.rtDrainTimerId = null;
+
+        const ws = state.rtDrainingWs;
+        state.rtDrainingWs = null;
+        if (ws) {
+          ws.onmessage = null;
+          try {
+            ws.close();
+          } catch {}
+        }
+        if (flush) flushPendingRealtimeText();
+      }
+
+      /**
+       * 未確定（ライブ表示中）のテキストをすべて確定する
+       */
+      function flushPendingRealtimeText() {
+        for (const [id, text] of Array.from(store.rtBuffer)) {
+          const lp = store.rtLivePara.get(id);
+          if (lp) lp.remove();
+          if ((text || "").trim()) finalizeSentence(`${id}_final`, text);
+        }
+        store.rtBuffer.clear();
+        store.rtLivePara.clear();
+
+        flushInputTranscript();
+        flushOutputTranslation();
+      }
+
       async function startPcmCapture(stream) {
         state.rtAudioCtx = new AudioContext({
           sampleRate: CONFIG.RT_SAMPLE_RATE,
@@ -2453,7 +2836,6 @@
         const source = state.rtAudioCtx.createMediaStreamSource(stream);
 
         function sendFloat32(float32) {
-          if (!state.rtWs || state.rtWs.readyState !== WebSocket.OPEN) return;
           const pcm16 = new Int16Array(float32.length);
           for (let i = 0; i < float32.length; i++) {
             const s = Math.max(-1, Math.min(1, float32[i]));
@@ -2464,16 +2846,12 @@
           for (let i = 0; i < bytes.length; i += 0x8000) {
             binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
           }
-          const appendType =
-            state.rtMode === "translation"
-              ? "session.input_audio_buffer.append"
-              : "input_audio_buffer.append";
-          state.rtWs.send(
-            JSON.stringify({
-              type: appendType,
-              audio: btoa(binary),
-            }),
-          );
+          // 接続が開くまで（再接続中を含む）は溜めておき、開いたら順に送る
+          state.pcmQueue.push(btoa(binary));
+          if (state.pcmQueue.length > CONFIG.RT_QUEUE_MAX_CHUNKS) {
+            state.pcmQueue.shift();
+          }
+          flushPcmQueue();
         }
 
         let processor;
@@ -2542,7 +2920,25 @@
         console.log("[RT] PCM capture started");
       }
 
+      /**
+       * 溜まっている音声を、接続が使える状態なら順に送信する
+       */
+      function flushPcmQueue() {
+        const ws = state.rtWs;
+        if (!ws || ws.readyState !== WebSocket.OPEN || !ws._ready) return;
+        const appendType =
+          state.rtMode === "translation"
+            ? "session.input_audio_buffer.append"
+            : "input_audio_buffer.append";
+        while (state.pcmQueue.length) {
+          ws.send(
+            JSON.stringify({ type: appendType, audio: state.pcmQueue.shift() }),
+          );
+        }
+      }
+
       function stopPcmCapture() {
+        state.pcmQueue = [];
         try {
           state.rtProcessor?.disconnect();
         } catch {}
@@ -2576,6 +2972,58 @@
         return { completed, remainder: buf };
       }
 
+      /**
+       * ストリームで届くテキスト（delta）を文単位で確定しつつ、
+       * 未確定の残りをライブ表示する共通処理（文字起こし・原文・翻訳で共用）
+       * @param {object} args
+       * @param {string} args.buf これまでの未確定テキスト
+       * @param {HTMLParagraphElement|null} args.live ライブ表示中の <p>
+       * @param {string} args.delta 今回届いたテキスト
+       * @param {HTMLElement} args.container 表示先
+       * @param {"user"|"translate"} args.variant ライブ <p> の種類
+       * @param {(sentence: string, index: number) => void} args.onSentence 確定した文の処理
+       * @returns {{ buf: string, live: HTMLParagraphElement|null }} 更新後の状態
+       */
+      function advanceLiveStream({
+        buf,
+        live,
+        delta,
+        container,
+        variant,
+        onSentence,
+      }) {
+        const { completed, remainder } = splitAtSentenceBoundaries(
+          (buf || "") + delta,
+        );
+
+        if (completed.length > 0) {
+          // 確定した文をライブパラから外して個別 <p> に確定
+          if (live) {
+            live.remove();
+            live = null;
+          }
+          completed.forEach((s, i) => onSentence(s, i));
+          scrollToBottom(container);
+        }
+
+        // 未確定テキストをライブ <p> に表示（辞書変換も適用）
+        if (remainder) {
+          const liveText = applyDictionary(remainder);
+          if (!live) {
+            live = createMessageParagraph(variant, liveText);
+            container.appendChild(live);
+          } else {
+            live.textContent = liveText;
+          }
+          scrollToBottom(container);
+        } else if (live) {
+          live.remove();
+          live = null;
+        }
+
+        return { buf: remainder, live };
+      }
+
       function finalizeSentence(sentId, text) {
         text = applyDictionary(text.trim());
         if (!text) return;
@@ -2603,6 +3051,9 @@
           case "session.input_transcript.delta":
             if (ev.delta) {
               resetTranscriptWatchdog();
+              // 原文が届いた＝発話あり。ここから翻訳が届くまでの時間を監視する
+              if (!state.translationVoiceAt)
+                state.translationVoiceAt = Date.now();
               pushInputTranscriptDelta(ev.delta);
             }
             break;
@@ -2646,34 +3097,16 @@
        * @param {string} delta
        */
       function pushInputTranscriptDelta(delta) {
-        const buf = (store.rtTransInBuf || "") + delta;
-        const { completed, remainder } = splitAtSentenceBoundaries(buf);
-
-        if (completed.length > 0) {
-          if (store.rtTransInLive) {
-            store.rtTransInLive.remove();
-            store.rtTransInLive = null;
-          }
-          completed.forEach((s, i) =>
-            finalizeSentence(`rtin_${Date.now()}_${i}`, s),
-          );
-        }
-
-        store.rtTransInBuf = remainder;
-
-        if (remainder) {
-          const liveText = applyDictionary(remainder);
-          if (!store.rtTransInLive) {
-            store.rtTransInLive = createMessageParagraph("user", liveText);
-            el.transcriptContainer.appendChild(store.rtTransInLive);
-          } else {
-            store.rtTransInLive.textContent = liveText;
-          }
-          scrollToBottom(el.transcriptContainer);
-        } else if (store.rtTransInLive) {
-          store.rtTransInLive.remove();
-          store.rtTransInLive = null;
-        }
+        const next = advanceLiveStream({
+          buf: store.rtTransInBuf,
+          live: store.rtTransInLive,
+          delta,
+          container: el.transcriptContainer,
+          variant: "user",
+          onSentence: (s, i) => finalizeSentence(`rtin_${Date.now()}_${i}`, s),
+        });
+        store.rtTransInBuf = next.buf;
+        store.rtTransInLive = next.live;
       }
 
       /**
@@ -2713,11 +3146,7 @@
         const rem = (store.rtTransOutBuf || "").trim();
         store.rtTransOutBuf = "";
         if (rem) {
-          const p = createMessageParagraph(
-            "translate",
-            applyDictionary(withTrailingTranslationPunctuation(rem)),
-          );
-          el.translationContainer.appendChild(p);
+          appendTranslationParagraph(rem);
           scrollToBottom(el.translationContainer);
         }
       }
@@ -2727,42 +3156,28 @@
        * @param {string} delta
        */
       function pushOutputTranslationDelta(delta) {
-        const buf = (store.rtTransOutBuf || "") + delta;
-        const { completed, remainder } = splitAtSentenceBoundaries(buf);
+        const next = advanceLiveStream({
+          buf: store.rtTransOutBuf,
+          live: store.rtTransOutLive,
+          delta,
+          container: el.translationContainer,
+          variant: "translate",
+          onSentence: appendTranslationParagraph,
+        });
+        store.rtTransOutBuf = next.buf;
+        store.rtTransOutLive = next.live;
+      }
 
-        if (completed.length > 0) {
-          if (store.rtTransOutLive) {
-            store.rtTransOutLive.remove();
-            store.rtTransOutLive = null;
-          }
-          completed.forEach((s) => {
-            const p = createMessageParagraph(
-              "translate",
-              applyDictionary(withTrailingTranslationPunctuation(s)),
-            );
-            el.translationContainer.appendChild(p);
-          });
-          scrollToBottom(el.translationContainer);
-        }
-
-        store.rtTransOutBuf = remainder;
-
-        if (remainder) {
-          const liveText = applyDictionary(remainder);
-          if (!store.rtTransOutLive) {
-            store.rtTransOutLive = createMessageParagraph(
-              "translate",
-              liveText,
-            );
-            el.translationContainer.appendChild(store.rtTransOutLive);
-          } else {
-            store.rtTransOutLive.textContent = liveText;
-          }
-          scrollToBottom(el.translationContainer);
-        } else if (store.rtTransOutLive) {
-          store.rtTransOutLive.remove();
-          store.rtTransOutLive = null;
-        }
+      /**
+       * 確定した翻訳文を翻訳欄に追加する
+       * @param {string} text
+       */
+      function appendTranslationParagraph(text) {
+        const p = createMessageParagraph(
+          "translate",
+          applyDictionary(withTrailingTranslationPunctuation(text)),
+        );
+        el.translationContainer.appendChild(p);
       }
 
       function handleRealtimeEvent(ev) {
@@ -2787,42 +3202,18 @@
             if (!delta) break;
             resetTranscriptWatchdog();
 
-            const buf = (store.rtBuffer.get(item_id) || "") + delta;
-            const { completed, remainder } = splitAtSentenceBoundaries(buf);
-
-            if (completed.length > 0) {
-              // 確定した文をライブパラから外して個別 <p> に確定
-              const lp = store.rtLivePara.get(item_id);
-              if (lp) {
-                lp.remove();
-                store.rtLivePara.delete(item_id);
-              }
-              completed.forEach((s, i) => {
-                finalizeSentence(`${item_id}_${Date.now()}_${i}`, s);
-              });
-            }
-
-            store.rtBuffer.set(item_id, remainder);
-
-            // 未確定テキストをライブ <p> に表示（辞書変換も適用）
-            if (remainder) {
-              const liveText = applyDictionary(remainder);
-              let lp = store.rtLivePara.get(item_id);
-              if (!lp) {
-                lp = createMessageParagraph("user", liveText);
-                el.transcriptContainer.appendChild(lp);
-                store.rtLivePara.set(item_id, lp);
-              } else {
-                lp.textContent = liveText;
-              }
-              scrollToBottom(el.transcriptContainer);
-            } else {
-              const lp = store.rtLivePara.get(item_id);
-              if (lp) {
-                lp.remove();
-                store.rtLivePara.delete(item_id);
-              }
-            }
+            const next = advanceLiveStream({
+              buf: store.rtBuffer.get(item_id),
+              live: store.rtLivePara.get(item_id) || null,
+              delta,
+              container: el.transcriptContainer,
+              variant: "user",
+              onSentence: (s, i) =>
+                finalizeSentence(`${item_id}_${Date.now()}_${i}`, s),
+            });
+            store.rtBuffer.set(item_id, next.buf);
+            if (next.live) store.rtLivePara.set(item_id, next.live);
+            else store.rtLivePara.delete(item_id);
             break;
           }
 
@@ -2930,7 +3321,7 @@
         try {
           const fullTranscript = payload?.fullTranscript ?? "";
           const newSegment = payload?.newSegment ?? "";
-          if (!newSegment.trim()) return;
+          if (!newSegment.trim()) return false;
 
           const cleaned = applyDictionary(
             (
@@ -2940,7 +3331,7 @@
               })
             )?.trim(),
           );
-          if (!cleaned) return;
+          if (!cleaned) return false;
 
           const p = createMessageParagraph("ai");
           el.aiContainer.appendChild(p);
@@ -2952,24 +3343,11 @@
           }
 
           scrollToBottom(el.aiContainer);
+          return true;
         } catch (err) {
           console.error(err);
+          return false;
         }
-      }
-
-      /**
-       * OpenAI API による文字起こし整形
-       * @param {string} text
-       * @returns {Promise<string>}
-       */
-      async function cleanupTranscriptWithOpenAI(text) {
-        const prompt = buildCleanupPrompt(text);
-        return callOpenAIResponses({
-          model: CONFIG.AI_CLEAN_MODEL || "gpt-4.1-mini",
-          input: prompt,
-          temperature: 0,
-          errorLabel: "OpenAI cleanup error",
-        });
       }
 
       /**
@@ -3024,36 +3402,57 @@
        * - AI欄には、過去の要約もバブルとして残していく
        */
       async function updateConversationSummary() {
+        // 要約のAPI応答待ちの間は重ねて実行しない（同じ範囲の二重要約を防ぐ）
+        if (state.aiSummaryInFlight) return;
+        // 要約「なし」のときはAI要約を行わない
+        if ((el.aiLangSelect?.value || "none") === "none") return;
+
+        // 確定済みの発言（メモ・未確定のライブ表示を除く）
+        const live = new Set(store.rtLivePara.values());
+        if (store.rtTransInLive) live.add(store.rtTransInLive);
+        const paras = Array.from(
+          el.transcriptContainer.querySelectorAll("p"),
+        ).filter((p) => !isCommentParagraph(p) && !live.has(p));
+
+        // 要約済みかどうかは段落ごとに記録する
+        // （文字数の位置で管理すると、発言を編集・削除したときに範囲がずれるため）
+        const pending = paras.filter((p) => !p.dataset.aiDone);
+        const newSegment = pending
+          .map((p) => p.innerText)
+          .join("\n")
+          .trim();
+
+        const chunkSize =
+          CONFIG.AI_SUMMARY_CHUNK_CHARS && CONFIG.AI_SUMMARY_CHUNK_CHARS > 0
+            ? CONFIG.AI_SUMMARY_CHUNK_CHARS
+            : 400;
+
+        // 未要約分がしきい値に達するまではスキップ
+        if (newSegment.length < chunkSize) return;
+
+        const fullTranscript = paras
+          .map((p) => p.innerText)
+          .join("\n")
+          .trim();
+
+        state.aiSummaryInFlight = true;
+        pending.forEach((p) => (p.dataset.aiDone = "1"));
+        let ok = false;
         try {
-          const transcript = getParagraphsTextWithoutComments(
-            el.transcriptContainer,
-          );
-          const trimmed = transcript.trim();
-          if (!trimmed) return;
-
-          const totalLength = trimmed.length;
-          const lastLength = state.aiSummaryLastProcessedLength || 0;
-          const chunkSize =
-            CONFIG.AI_SUMMARY_CHUNK_CHARS && CONFIG.AI_SUMMARY_CHUNK_CHARS > 0
-              ? CONFIG.AI_SUMMARY_CHUNK_CHARS
-              : 400;
-
-          // まだ十分な長さになっていない最初のフェーズはスキップ
-          if (lastLength === 0 && totalLength < chunkSize) return;
-
-          // 2回目以降：前回からの増分がしきい値未満ならスキップ
-          if (lastLength > 0 && totalLength - lastLength < chunkSize) return;
-
-          // しきい値を満たしたら、増分だけを対象に新しいサマリバブルを追加
-          const newSegment = trimmed.slice(lastLength);
-          await cleanupTranscriptText("summary_incremental", {
-            fullTranscript: trimmed,
+          ok = await cleanupTranscriptText("summary_incremental", {
+            fullTranscript,
             newSegment,
           });
+        } finally {
+          state.aiSummaryInFlight = false;
+          // 失敗した分は未要約に戻し、次の発言確定時に再試行する
+          if (!ok) pending.forEach((p) => delete p.dataset.aiDone);
+        }
 
-          state.aiSummaryLastProcessedLength = totalLength;
-        } catch (err) {
-          console.error(err);
+        if (ok) {
+          requestPersistHistorySnapshot();
+          // 応答待ちの間に溜まった分があれば続けて要約する
+          updateConversationSummary();
         }
       }
 
@@ -3068,8 +3467,9 @@
 
         const sanitized = title
           .replace(/[\\/:*?"<>|]/g, "_")
-          .replace(/\s+/g, "_")
-          .slice(0, 50);
+          .replace(/[\t\r\n]+/g, " ") // スペースは維持（改行・タブのみ空白に置換）
+          .slice(0, 50)
+          .trim();
 
         return sanitized || fallback;
       }
@@ -3088,20 +3488,16 @@
         const transcriptRaw = getParagraphsText(el.transcriptContainer);
         const prompt = buildReportPrompt(transcriptRaw);
 
-        el.reportDownloadLink.classList.add("is-hidden");
-        el.reportDownloadLink.href = "#";
-
-        const reportText = await generateTextWithOpenAI(prompt);
-        const main = reportText || "（生成結果が空でした）";
+        // 失敗・空のときは議事録欄を書き換えず例外にする
+        // （エラーメッセージが議事録として保存・画像生成に使われるのを防ぐ）
+        const main = ((await generateTextWithOpenAI(prompt)) || "").trim();
+        if (!main) throw new Error("生成結果が空でした。");
 
         // 画面表示：AI生成の議事録のみ
         el.reportOutput.textContent = main;
 
         // ダウンロード用：コメント除外した各セクション + メモ一覧
-        setReportDownloadLink(
-          `${buildFilenameBase("report")}.txt`,
-          buildReportDownloadText(main),
-        );
+        refreshReportDownloadLink();
         el.reportBox.scrollTop = 0;
         return main;
       }
@@ -3117,8 +3513,11 @@
         try {
           await generateReportCore();
         } catch (err) {
-          el.reportOutput.textContent =
-            "生成に失敗しました。\n" + (err?.message || String(err));
+          console.error(err);
+          // 議事録欄は変更しない（既存の議事録を残す）
+          alert(
+            "議事録の生成に失敗しました。\n" + (err?.message || String(err)),
+          );
         } finally {
           el.generateReportBtn.disabled = false;
           el.generateReportBtn.innerHTML = originalHTML;
@@ -3181,9 +3580,48 @@
         const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
         const url = URL.createObjectURL(blob);
 
+        const prevHref = el.reportDownloadLink.href || "";
+        if (prevHref.startsWith("blob:")) URL.revokeObjectURL(prevHref);
+
         el.reportDownloadLink.href = url;
         el.reportDownloadLink.download = filename;
         el.reportDownloadLink.classList.remove("is-hidden");
+      }
+
+      /**
+       * 現在の画面内容（議事録欄・タイトル）でテキストDLリンクを作り直して表示する
+       */
+      function refreshReportDownloadLink() {
+        setReportDownloadLink(
+          `${buildFilenameBase("report")}.txt`,
+          buildReportDownloadText(el.reportOutput?.textContent || ""),
+        );
+      }
+
+      /**
+       * 表示中のインフォグラフィック画像（data URL）を返す。無ければ null
+       * @returns {string|null}
+       */
+      function getInfographicDataUrl() {
+        const shown =
+          !!el.infographicImage?.src &&
+          !el.infographicImage.classList.contains("is-hidden");
+        return shown ? el.infographicImage.src : null;
+      }
+
+      /**
+       * インフォグラフィック画像を表示し、DLリンクを有効にする
+       * @param {string} dataUrl
+       */
+      function showInfographic(dataUrl) {
+        el.infographicImage.src = dataUrl;
+        el.infographicImage.classList.remove("is-hidden");
+        el.infographicPlaceholder.classList.add("is-hidden");
+        el.infographicBox.classList.remove("is-empty");
+
+        el.infographicDownloadLink.href = dataUrl;
+        el.infographicDownloadLink.download = `${buildFilenameBase("image")}.png`;
+        el.infographicDownloadLink.classList.remove("is-hidden");
       }
 
       /* =========================
@@ -3244,18 +3682,10 @@
           const b64 = await generateImageWithOpenAI(
             buildInfographicPrompt(report),
           );
-          const dataUrl = `data:image/png;base64,${b64}`;
-
-          el.infographicImage.src = dataUrl;
-          el.infographicImage.classList.remove("is-hidden");
-          el.infographicPlaceholder.classList.add("is-hidden");
-          el.infographicBox.classList.remove("is-empty");
-
-          el.infographicDownloadLink.href = dataUrl;
-          el.infographicDownloadLink.download = `${buildFilenameBase("image")}.png`;
-          el.infographicDownloadLink.classList.remove("is-hidden");
+          showInfographic(`data:image/png;base64,${b64}`);
 
           requestPersistHistorySnapshot({ debounceMs: 0 });
+          saveMediaForCurrent();
         } catch (err) {
           console.error(err);
           el.infographicPlaceholder.textContent =
@@ -3361,6 +3791,8 @@
 
           // startSession() 内で Realtime WS 接続が開始されるため、先に true にする
           state.sessionRunning = true;
+          state.rtConnectFailCount = 0;
+          setRtStatus("");
 
           try {
             await startSession();
@@ -3371,6 +3803,12 @@
             startAutoReconnectWatchdogs();
           } catch (err) {
             state.sessionRunning = false;
+            // 途中まで始まっていたマイク・録音・接続を確実に止める
+            try {
+              stopSession();
+            } catch (stopErr) {
+              console.error(stopErr);
+            }
             console.error(err);
             alert("録音開始に失敗しました。\n" + (err?.message || String(err)));
             updateSessionToggleUI(false);
@@ -3378,21 +3816,27 @@
             updateApiKeyGateUI();
           }
         } else {
-          state.sessionRunning = false;
-          stopSession();
-
-          // 停止時点で、議事録は空のままテキストDLリンクを表示する
-          setReportDownloadLink(
-            `${buildFilenameBase("report")}.txt`,
-            buildReportDownloadText(el.reportOutput?.textContent || ""),
-          );
-
-          requestPersistHistorySnapshot({ debounceMs: 0 });
-          updateSessionToggleUI(false);
-          updateRealtimeButtons();
-          clearSessionLimitTimer();
-          updateApiKeyGateUI();
+          haltSession();
         }
+      }
+
+      /**
+       * セッションを停止し、UI・履歴・DLリンクを更新する
+       * （停止ボタン、および接続エラーによる自動停止から呼ぶ）
+       */
+      function haltSession() {
+        state.sessionRunning = false;
+        stopSession();
+        setRtStatus("");
+
+        // 停止時点で、議事録は空のままテキストDLリンクを表示する
+        refreshReportDownloadLink();
+
+        requestPersistHistorySnapshot({ debounceMs: 0 });
+        updateSessionToggleUI(false);
+        updateRealtimeButtons();
+        clearSessionLimitTimer();
+        updateApiKeyGateUI();
       }
 
       /**
@@ -3440,12 +3884,32 @@
           }
 
           case "clear-all": {
-            const ok = confirm("全て消去しますか？");
+            // 何が残り、何が失われるかをその場で伝える
+            const lines = [
+              state.sessionRunning
+                ? "全て消去して、新しい議題として録音を続けますか？"
+                : "全て消去しますか？",
+            ];
+            if (state.historyCurrentId) {
+              lines.push("ここまでの文字起こし・議事録は履歴に残ります。");
+            }
+            const audioWillBeLost = state.sessionRunning
+              ? !isSaveMediaEnabled()
+              : state.audioUnsaved;
+            if (audioWillBeLost) {
+              lines.push(
+                "音声は履歴に保存しない設定のため、消去すると失われます。",
+              );
+            }
+            const ok = confirm(lines.join("\n"));
             if (!ok) return;
-            clearConversationPanels();
 
-            // 稼働中でなければ、以降は新規セッション扱い（現在の履歴/タイトルから切り離す）
-            if (!state.sessionRunning) {
+            // 録音中でも停止中でも、消しゴム＝別の議題への切り替え
+            if (state.sessionRunning) {
+              await rotateToNewSession();
+            } else {
+              clearConversationPanels();
+              resetRecording();
               state.historyCurrentId = null;
               setTitleBarEntry(null);
             }
@@ -3459,8 +3923,7 @@
 
           case "reconnect-session":
             if (state.sessionRunning && state.micStream) {
-              stopRealtimeWS();
-              connectRealtimeWS(state.micStream);
+              reconnectRealtime();
             }
             temporarilyDisableButton(el.reconnectBtn, 500);
             return;
@@ -3563,6 +4026,10 @@
           case "restore-history": {
             const id = button.dataset.historyId;
             if (!id) return;
+            if (state.sessionRunning) {
+              alert("録音中は履歴を復元できません。停止してから操作してください。");
+              return;
+            }
             await restoreHistoryById(id);
             return;
           }
@@ -3570,6 +4037,12 @@
           case "delete-history": {
             const id = button.dataset.historyId;
             if (!id) return;
+            if (state.sessionRunning && id === state.historyCurrentId) {
+              alert(
+                "録音中の履歴は削除できません。停止してから操作してください。",
+              );
+              return;
+            }
             const ok = confirm("この履歴を削除しますか？");
             if (!ok) return;
             await deleteHistoryById(id);
@@ -3577,6 +4050,12 @@
           }
 
           case "clear-history": {
+            if (state.sessionRunning) {
+              alert(
+                "録音中は履歴を全削除できません。停止してから操作してください。",
+              );
+              return;
+            }
             const ok = confirm("履歴を全て削除しますか？");
             if (!ok) return;
             await clearHistoryAll();
@@ -3603,72 +4082,124 @@
       }
 
       const IDB_DB_NAME = "transreport_db";
-      const IDB_DB_VERSION = 1;
       const IDB_STORE_HISTORY = "history";
+      // 履歴ごとの音声・画像は、履歴とは別のデータベースに保存する。
+      // 既存の履歴データベースの形式を変えないので、このアプリを別のタブで
+      // 開いたままでも（古い版のタブが残っていても）読み込みが止まらない。
+      const IDB_MEDIA_DB_NAME = "transreport_media_db";
+      const IDB_STORE_MEDIA = "media";
 
-      function openHistoryDb() {
+      const idbConnections = {};
+
+      /**
+       * データベースを開く（接続は使い回す）
+       * バージョンは指定せず、現在の形式のまま開く。
+       * @param {string} name
+       * @param {string} storeName 新規作成時に用意するストア
+       * @returns {Promise<IDBDatabase>}
+       */
+      function openDb(name, storeName) {
+        if (!idbConnections[name]) {
+          idbConnections[name] = new Promise((resolve, reject) => {
+            const req = indexedDB.open(name);
+            req.onupgradeneeded = () => {
+              const db = req.result;
+              if (!db.objectStoreNames.contains(storeName)) {
+                db.createObjectStore(storeName, { keyPath: "id" });
+              }
+            };
+            req.onsuccess = () => {
+              const db = req.result;
+              const forget = () => delete idbConnections[name];
+              // 他のタブが形式を更新しようとしたら、妨げないよう接続を手放す
+              db.onversionchange = () => {
+                db.close();
+                forget();
+              };
+              db.onclose = forget;
+              resolve(db);
+            };
+            req.onerror = () => {
+              delete idbConnections[name];
+              reject(req.error);
+            };
+          });
+        }
+        return idbConnections[name];
+      }
+
+      const openHistoryDb = () => openDb(IDB_DB_NAME, IDB_STORE_HISTORY);
+      const openMediaDb = () => openDb(IDB_MEDIA_DB_NAME, IDB_STORE_MEDIA);
+
+      /**
+       * 読み取り系の操作を1つ実行し、その結果を返す
+       * @param {IDBDatabase} db
+       * @param {string} storeName
+       * @param {(store: IDBObjectStore) => IDBRequest} op
+       */
+      function idbRead(db, storeName, op) {
         return new Promise((resolve, reject) => {
-          const req = indexedDB.open(IDB_DB_NAME, IDB_DB_VERSION);
-          req.onupgradeneeded = () => {
-            const db = req.result;
-            if (!db.objectStoreNames.contains(IDB_STORE_HISTORY)) {
-              db.createObjectStore(IDB_STORE_HISTORY, { keyPath: "id" });
-            }
-          };
+          const tx = db.transaction(storeName, "readonly");
+          const req = op(tx.objectStore(storeName));
           req.onsuccess = () => resolve(req.result);
           req.onerror = () => reject(req.error);
         });
       }
 
-      async function idbGetAllHistory() {
-        const db = await openHistoryDb();
+      /**
+       * 書き込み系の操作を1トランザクションで実行する
+       * @param {IDBDatabase} db
+       * @param {string} storeName
+       * @param {(store: IDBObjectStore) => void} op
+       */
+      function idbWrite(db, storeName, op) {
         return new Promise((resolve, reject) => {
-          const tx = db.transaction(IDB_STORE_HISTORY, "readonly");
-          const req = tx.objectStore(IDB_STORE_HISTORY).getAll();
-          req.onsuccess = () => resolve(req.result || []);
-          req.onerror = () => reject(req.error);
-        });
-      }
-
-      async function idbGetHistory(id) {
-        const db = await openHistoryDb();
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction(IDB_STORE_HISTORY, "readonly");
-          const req = tx.objectStore(IDB_STORE_HISTORY).get(id);
-          req.onsuccess = () => resolve(req.result || null);
-          req.onerror = () => reject(req.error);
-        });
-      }
-
-      async function idbPutHistory(entry) {
-        const db = await openHistoryDb();
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction(IDB_STORE_HISTORY, "readwrite");
-          tx.objectStore(IDB_STORE_HISTORY).put(entry);
+          const tx = db.transaction(storeName, "readwrite");
+          op(tx.objectStore(storeName));
           tx.oncomplete = () => resolve();
           tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
         });
       }
 
-      async function idbDeleteHistory(id) {
-        const db = await openHistoryDb();
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction(IDB_STORE_HISTORY, "readwrite");
-          tx.objectStore(IDB_STORE_HISTORY).delete(id);
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
-        });
+      const readHistory = async (op) =>
+        idbRead(await openHistoryDb(), IDB_STORE_HISTORY, op);
+      const writeHistory = async (op) =>
+        idbWrite(await openHistoryDb(), IDB_STORE_HISTORY, op);
+
+      const idbGetAllHistory = async () =>
+        (await readHistory((s) => s.getAll())) || [];
+      const idbGetHistory = async (id) =>
+        (await readHistory((s) => s.get(id))) || null;
+      const idbPutHistory = (entry) => writeHistory((s) => s.put(entry));
+      const idbDeleteHistory = (id) => writeHistory((s) => s.delete(id));
+      const idbClearHistory = () => writeHistory((s) => s.clear());
+
+      async function idbGetMedia(id) {
+        const read = async (db) =>
+          (await idbRead(db, IDB_STORE_MEDIA, (s) => s.get(id))) || null;
+
+        const found = await read(await openMediaDb());
+        if (found) return found;
+
+        // 一時期の版は履歴データベース内に音声・画像を保存していたので、そちらも探す
+        const historyDb = await openHistoryDb();
+        return historyDb.objectStoreNames.contains(IDB_STORE_MEDIA)
+          ? read(historyDb)
+          : null;
       }
 
-      async function idbClearHistory() {
-        const db = await openHistoryDb();
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction(IDB_STORE_HISTORY, "readwrite");
-          tx.objectStore(IDB_STORE_HISTORY).clear();
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
-        });
+      /**
+       * 音声・画像ストアへの書き込み系操作を1トランザクションで実行する
+       * @param {(store: IDBObjectStore) => void} op
+       */
+      async function idbWriteMedia(op) {
+        return idbWrite(await openMediaDb(), IDB_STORE_MEDIA, op);
       }
+
+      const idbPutMedia = (media) => idbWriteMedia((s) => s.put(media));
+      const idbDeleteMedia = (id) => idbWriteMedia((s) => s.delete(id));
+      const idbClearMedia = () => idbWriteMedia((s) => s.clear());
 
       /**
        * 旧バージョン（localStorage）の履歴データが残っていればIndexedDBへ移行する
@@ -3727,13 +4258,20 @@
         scrollToBottom(container);
       }
 
+      /**
+       * 現在選択中の言語（発言/翻訳/要約）を履歴保存用の形で返す
+       */
+      function getCurrentLangs() {
+        return {
+          transcript: el.transcriptLangSelect.value,
+          translate: el.translateLangSelect.value,
+          ai: el.aiLangSelect.value,
+        };
+      }
+
       function buildHistorySnapshot() {
         const snapshot = {
-          langs: {
-            transcript: el.transcriptLangSelect.value,
-            translate: el.translateLangSelect.value,
-            ai: el.aiLangSelect.value,
-          },
+          langs: getCurrentLangs(),
           transcriptItems: serializeContainerWithVariants(
             el.transcriptContainer,
           ),
@@ -3744,21 +4282,41 @@
           reportText: el.reportOutput?.textContent || "",
         };
 
-        if (isSaveMediaEnabled()) {
-          const hasInfographic =
-            !!el.infographicImage?.src &&
-            !el.infographicImage.classList.contains("is-hidden");
-
-          snapshot.media = {
-            audioDataUrl: state.lastAudioDataUrl || null,
-            infographicDataUrl: hasInfographic ? el.infographicImage.src : null,
-          };
-        }
-
+        // 音声・画像はここには含めない（saveMediaForCurrent で別保存）。
+        // 発言が確定するたびに大きなデータを書き直さないようにするため。
         return snapshot;
       }
 
+      /**
+       * 現在の履歴の音声・画像を保存する（設定ONのときのみ）
+       * 停止時と画像生成時にだけ呼ぶ。
+       */
+      async function saveMediaForCurrent() {
+        if (!isSaveMediaEnabled() || !state.historyCurrentId) return;
+
+        try {
+          await idbPutMedia({
+            id: state.historyCurrentId,
+            audio: state.lastAudio || null,
+            priorAudio: state.priorAudio.slice(),
+            infographicDataUrl: getInfographicDataUrl(),
+          });
+        } catch (err) {
+          console.error(err);
+          setRtStatus(
+            "音声・画像を履歴に保存できませんでした（保存容量を確認してください）",
+          );
+        }
+      }
+
       async function beginHistorySession() {
+        // 停止→開始の再開時は、同じ履歴エントリ（タイトル含む）をそのまま使い続ける。
+        // 新規エントリを作るのは、消しゴムで切り離した後など現在の履歴が無いときだけ。
+        if (state.historyCurrentId) {
+          const existing = await idbGetHistory(state.historyCurrentId);
+          if (existing) return;
+        }
+
         const startedAt = Date.now();
         const id = String(startedAt);
 
@@ -3768,11 +4326,7 @@
           startedAt,
           updatedAt: startedAt,
           snapshot: {
-            langs: {
-              transcript: el.transcriptLangSelect.value,
-              translate: el.translateLangSelect.value,
-              ai: el.aiLangSelect.value,
-            },
+            langs: getCurrentLangs(),
             transcriptItems: [],
             translationItems: [],
             aiItems: [],
@@ -3786,6 +4340,7 @@
         const excess = list.slice(CONFIG.HISTORY_MAX);
         for (const old of excess) {
           await idbDeleteHistory(old.id);
+          await idbDeleteMedia(old.id);
         }
 
         state.historyCurrentId = id;
@@ -3797,21 +4352,31 @@
         if (!state.historyCurrentId) return;
 
         if (state.historySaveTimerId) clearTimeout(state.historySaveTimerId);
-        state.historySaveTimerId = setTimeout(async () => {
+        state.historySaveTimerId = setTimeout(() => {
           state.historySaveTimerId = null;
-
-          const entry = await idbGetHistory(state.historyCurrentId);
-          if (!entry) return;
-
-          const updated = {
-            ...entry,
-            updatedAt: Date.now(),
-            snapshot: buildHistorySnapshot(),
-          };
-
-          await idbPutHistory(updated);
-          await renderHistoryList();
+          persistHistoryNow().catch(console.error);
         }, debounceMs);
+      }
+
+      /**
+       * 現在の画面内容を、現在の履歴へ今すぐ保存する
+       */
+      async function persistHistoryNow() {
+        if (state.historySaveTimerId) {
+          clearTimeout(state.historySaveTimerId);
+          state.historySaveTimerId = null;
+        }
+        const id = state.historyCurrentId;
+        if (!id) return;
+
+        // 画面内容は await の前に確定させる（保存中に画面が変わっても混ざらない）
+        const snapshot = buildHistorySnapshot();
+
+        const entry = await idbGetHistory(id);
+        if (!entry) return;
+
+        await idbPutHistory({ ...entry, updatedAt: Date.now(), snapshot });
+        await renderHistoryList();
       }
 
       async function restoreHistoryById(id) {
@@ -3842,28 +4407,49 @@
         );
         hydrateContainerFromItems(el.aiContainer, store.ai, snap.aiItems);
 
-        el.reportOutput.textContent = snap.reportText || "";
+        // 復元した発言は要約済み扱いにする（再開時に全文を要約し直さない）
+        el.transcriptContainer
+          .querySelectorAll("p")
+          .forEach((p) => (p.dataset.aiDone = "1"));
 
-        if (snap.media?.audioDataUrl) {
-          el.mediaDownloadLink.href = snap.media.audioDataUrl;
-          el.mediaDownloadLink.classList.remove("is-hidden");
+        // 旧バージョンで議事録欄に保存されてしまった生成失敗メッセージは復元しない
+        el.reportOutput.textContent = /^生成に失敗しました。/.test(
+          snap.reportText || "",
+        )
+          ? ""
+          : snap.reportText || "";
+
+        // 音声・画像は履歴本体とは別に保存している。
+        // 旧形式（履歴本体に埋め込み）の履歴は、ここで別保存へ移行する。
+        let media = await idbGetMedia(id);
+        if (!media && snap.media) {
+          media = {
+            id,
+            audio: snap.media.audioDataUrl || null,
+            infographicDataUrl: snap.media.infographicDataUrl || null,
+          };
+          await idbPutMedia(media);
         }
 
-        if (snap.media?.infographicDataUrl) {
-          el.infographicImage.src = snap.media.infographicDataUrl;
-          el.infographicImage.classList.remove("is-hidden");
-          el.infographicPlaceholder.classList.add("is-hidden");
-          el.infographicBox.classList.remove("is-empty");
-          el.infographicDownloadLink.href = snap.media.infographicDataUrl;
-          el.infographicDownloadLink.classList.remove("is-hidden");
-        }
+        // 復元前の録音は別の議題のものなので引き継がない
+        resetRecording();
+
+        // 保存済みの音声は「以前の音声」として保持する。
+        // この後に録音を続けても置き換えず、別ファイルとして並べて残す。
+        state.priorAudio = [...(media?.priorAudio || []), media?.audio].filter(
+          Boolean,
+        );
+        renderAudioLinks();
 
         setTitleBarEntry(entry);
         state.historyCurrentId = id;
 
+        // 復元した内容でテキストDLリンクを再表示する（停止時と同じ形式）
+        refreshReportDownloadLink();
+
         // ファイル名は復元したタイトルに合わせる（タイトル確定後に設定する）
-        if (snap.media?.infographicDataUrl) {
-          el.infographicDownloadLink.download = `${buildFilenameBase("image")}.png`;
+        if (media?.infographicDataUrl) {
+          showInfographic(media.infographicDataUrl);
         }
 
         closeHistoryDrawer();
@@ -3881,6 +4467,7 @@
 
       async function deleteHistoryById(id) {
         await idbDeleteHistory(id);
+        await idbDeleteMedia(id);
         if (state.historyCurrentId === id) state.historyCurrentId = null;
 
         if (state.titleBarEntryId === id) {
@@ -3892,6 +4479,7 @@
 
       async function clearHistoryAll() {
         await idbClearHistory();
+        await idbClearMedia();
         state.historyCurrentId = null;
         setTitleBarEntry(null);
         await renderHistoryList();
@@ -4068,6 +4656,41 @@
       }
 
       /**
+       * 編集対象の要素内にカーソルを置く（段落・議事録の編集で共用）
+       * @param {HTMLElement} target
+       * @param {number} [clientX]
+       * @param {number} [clientY]
+       */
+      function placeCaretAtPoint(target, clientX, clientY) {
+        // タップ位置にカーソルを置く（取得できなければ末尾）
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+
+        let caretRange = null;
+        if (typeof clientX === "number" && typeof clientY === "number") {
+          if (document.caretRangeFromPoint) {
+            caretRange = document.caretRangeFromPoint(clientX, clientY);
+          } else if (document.caretPositionFromPoint) {
+            const pos = document.caretPositionFromPoint(clientX, clientY);
+            if (pos) {
+              caretRange = document.createRange();
+              caretRange.setStart(pos.offsetNode, pos.offset);
+            }
+          }
+        }
+
+        if (caretRange && target.contains(caretRange.startContainer)) {
+          caretRange.collapse(true);
+          sel.addRange(caretRange);
+        } else {
+          const r = document.createRange();
+          r.selectNodeContents(target);
+          r.collapse(false);
+          sel.addRange(r);
+        }
+      }
+
+      /**
        * ライブ表示中（未確定）の段落なら「確定扱い」に昇格させる。
        * 以降のdeltaは新しいバブルへ流れるため、編集が上書きされない。
        * @param {HTMLParagraphElement} p
@@ -4117,32 +4740,7 @@
         p.setAttribute("contenteditable", "true");
         p.focus({ preventScroll: true });
 
-        // タップ位置にカーソルを置く（取得できなければ末尾）
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-
-        let caretRange = null;
-        if (typeof clientX === "number" && typeof clientY === "number") {
-          if (document.caretRangeFromPoint) {
-            caretRange = document.caretRangeFromPoint(clientX, clientY);
-          } else if (document.caretPositionFromPoint) {
-            const pos = document.caretPositionFromPoint(clientX, clientY);
-            if (pos) {
-              caretRange = document.createRange();
-              caretRange.setStart(pos.offsetNode, pos.offset);
-            }
-          }
-        }
-
-        if (caretRange && p.contains(caretRange.startContainer)) {
-          caretRange.collapse(true);
-          sel.addRange(caretRange);
-        } else {
-          const r = document.createRange();
-          r.selectNodeContents(p);
-          r.collapse(false);
-          sel.addRange(r);
-        }
+        placeCaretAtPoint(p, clientX, clientY);
 
         const finish = (revert) => {
           state.editingContainer = null;
@@ -4216,31 +4814,7 @@
         pre.setAttribute("contenteditable", "true");
         pre.focus({ preventScroll: true });
 
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-
-        let caretRange = null;
-        if (typeof clientX === "number" && typeof clientY === "number") {
-          if (document.caretRangeFromPoint) {
-            caretRange = document.caretRangeFromPoint(clientX, clientY);
-          } else if (document.caretPositionFromPoint) {
-            const pos = document.caretPositionFromPoint(clientX, clientY);
-            if (pos) {
-              caretRange = document.createRange();
-              caretRange.setStart(pos.offsetNode, pos.offset);
-            }
-          }
-        }
-
-        if (caretRange && pre.contains(caretRange.startContainer)) {
-          caretRange.collapse(true);
-          sel.addRange(caretRange);
-        } else {
-          const r = document.createRange();
-          r.selectNodeContents(pre);
-          r.collapse(false);
-          sel.addRange(r);
-        }
+        placeCaretAtPoint(pre, clientX, clientY);
 
         const finish = (revert) => {
           state.editingContainer = null;
@@ -4257,10 +4831,7 @@
 
           // 生成済みのダウンロードリンクがあれば、編集後の本文で更新
           if (!el.reportDownloadLink.classList.contains("is-hidden")) {
-            setReportDownloadLink(
-              `${buildFilenameBase("report")}.txt`,
-              buildReportDownloadText(pre.textContent),
-            );
+            refreshReportDownloadLink();
           }
 
           requestPersistHistorySnapshot({ debounceMs: 0 });
@@ -4293,8 +4864,7 @@
        */
       el.translateLangSelect.addEventListener("change", () => {
         if (state.sessionRunning && state.micStream) {
-          stopRealtimeWS();
-          connectRealtimeWS(state.micStream);
+          reconnectRealtime();
           startAutoReconnectWatchdogs();
         }
       });
@@ -4348,6 +4918,29 @@
           state.draftTitle = newTitle;
           renderSessionTitleText(null);
         }
+      });
+
+      /**
+       * ダウンロードリンク：クリックした時点の内容・タイトルで作り直す
+       * （停止後にタイトル変更・メモ追加・編集をしても、最新の状態で保存できる）
+       */
+      el.reportDownloadLink.addEventListener("click", () => {
+        refreshReportDownloadLink();
+      });
+
+      el.infographicDownloadLink.addEventListener("click", () => {
+        el.infographicDownloadLink.download = `${buildFilenameBase("image")}.png`;
+      });
+
+      /**
+       * 録音中にページを閉じる/再読み込みしようとしたら確認を出す
+       * （録音データはメモリ上にあり、閉じると失われるため）
+       */
+      window.addEventListener("beforeunload", (e) => {
+        // 録音中、または「履歴に保存されず未ダウンロードの録音」があるときに確認する
+        if (!state.sessionRunning && !state.audioUnsaved) return;
+        e.preventDefault();
+        e.returnValue = "";
       });
 
       /**
