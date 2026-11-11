@@ -1403,7 +1403,7 @@
 
           <div class="modal__body">
             <div class="modal__hint" style="margin-bottom: 10px">
-              文字起こし・翻訳・AI要約が確定したとき、登録したキーワードを自動で置換します。
+              文字起こし・翻訳・AI要約が確定したとき、登録したキーワードを自動で置換します。<br />登録した時点で表示済みの内容も置換します。
             </div>
             <div id="dictList" class="dictList">
               <!-- JSで描画 -->
@@ -2114,12 +2114,44 @@
         const dict = loadDictionary();
         let result = text;
         for (const entry of dict) {
-          if (!entry.from) continue;
-          // 特殊文字をエスケープしてグローバル置換
-          const escaped = entry.from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          result = result.replace(new RegExp(escaped, "g"), entry.to);
+          result = applyDictEntry(result, entry);
         }
         return result;
+      }
+
+      /**
+       * 辞書の1件分をテキストに適用する
+       * @param {string} text
+       * @param {{ from: string, to: string }} entry
+       * @returns {string}
+       */
+      function applyDictEntry(text, entry) {
+        if (!text || !entry.from) return text;
+        // 特殊文字をエスケープしてグローバル置換
+        const escaped = entry.from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return text.replace(new RegExp(escaped, "g"), entry.to);
+      }
+
+      /**
+       * 辞書に追加した1件を、表示済みの文字起こし・翻訳・AI要約にも遡って適用する
+       * - メモ（手入力した内容）と編集中の段落は対象外
+       * - 置換があれば履歴にも保存する
+       * @param {{ from: string, to: string }} entry
+       */
+      function applyDictEntryToDisplayed(entry) {
+        let changed = false;
+        [el.transcriptContainer, el.translationContainer, el.aiContainer].forEach(
+          (container) => {
+            container.querySelectorAll("p").forEach((p) => {
+              if (isCommentParagraph(p) || p.isContentEditable) return;
+              const next = applyDictEntry(p.textContent, entry);
+              if (next === p.textContent) return;
+              p.textContent = next;
+              changed = true;
+            });
+          },
+        );
+        if (changed) requestPersistHistorySnapshot({ debounceMs: 0 });
       }
 
       /**
@@ -3979,6 +4011,8 @@
             }
             dict.push({ from, to });
             saveDictionary(dict);
+            // 既に表示済みの内容にも遡って置換する
+            applyDictEntryToDisplayed({ from, to });
             if (fromEl) fromEl.value = "";
             if (toEl) toEl.value = "";
             renderDictList();
