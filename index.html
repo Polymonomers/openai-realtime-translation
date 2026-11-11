@@ -1486,6 +1486,48 @@
         STOP_DRAIN_MS: 2500,
         // 再接続中に溜めておく音声の上限（チャンク数。約20秒分）
         RT_QUEUE_MAX_CHUNKS: 120,
+
+        // ---- プロンプト（文面を変えたいときはここを編集する） ----
+        // 議事録生成の基本プロンプト（この後ろに文字起こし全文が続く）
+        REPORT_PROMPT: `
+          #命令
+          ・以下は会議内容の文字起こしデータです。
+          ・日本語の報告書を作成。
+          #制約条件
+          ・出力は報告書のみ（解説・前置き不要）。
+          ・「会議報告書」のようなタイトルは付けないこと。
+          ・Wordなどで扱いやすいレポート形式とし、Markdown記法は使わないこと。
+          ・事実だけに基づいて生成し、推論を含めないこと。
+          ・なるべくたくさんの詳細情報を含め、可能な限り詳しい内容で記載すること。
+          ・「メモ：」の後に記載された内容は確認済みの情報であり、最も信ぴょう性が高い。
+          ・「～の発言があった」といった発言ベースでの記載ではなく、会議内容を客観的にまとめること。
+          #参考
+          ・システム利用ユーザーは東ソー(Tosoh)の従業員である。文字起こしでは「闘争」「toso」などとなっていることがあるので、修正すること。
+          #文字起こし：`,
+        // インフォグラフィック生成の基本プロンプト（この後ろに議事録本文が続く）
+        INFOGRAPHIC_PROMPT: `
+          以下の内容を、1枚絵の日本語インフォグラフィックにしてください。
+          要件：
+          ・すべてのテキストラベル・見出し・注釈は自然で正確な日本語にすること。
+          ・要点を図解・アイコン・矢印・簡単なグラフなどで分かりやすく整理する。
+          ・タイトルを上部に大きく配置し、清潔でビジネス向けの配色にする。
+          ・文字化けや意味不明な文字を入れず、読みやすいレイアウトにする。
+
+          内容：`,
+        // AI要約（増分整形）の基本プロンプト
+        // {LANG} は要約の出力言語（英語名）に置き換わる。
+        // この後ろに FULL_TRANSCRIPT（全文）と NEW_SEGMENT（今回の増分）が続く。
+        SUMMARY_PROMPT: `
+          You are a transcription cleaner for meeting notes.
+          You receive the full transcript so far and a newly added segment.
+          Use the FULL_TRANSCRIPT only as context.
+          Only clean up and rewrite the NEW_SEGMENT in {LANG}.
+          Preserve the original meaning, decisions, and important details.
+          Fix obvious recognition errors and unclear parts based on context.
+          Add appropriate punctuation and line breaks.
+          Always output in {LANG}, regardless of the source language.
+          Do not output acknowledgements such as '承知しました' or any meta commentary.
+          Output only the cleaned NEW_SEGMENT.`,
       };
 
       /**
@@ -2363,21 +2405,8 @@
         Prompt
       ========================= */
       function buildReportPrompt(transcript, summary) {
-        return `
-          #命令
-          ・以下は会議内容の文字起こしデータです。
-          ・日本語の報告書を作成。
-          #制約条件
-          ・出力は報告書のみ（解説・前置き不要）。
-          ・「会議報告書」のようなタイトルは付けないこと。
-          ・Wordなどで扱いやすいレポート形式とし、Markdown記法は使わないこと。
-          ・事実だけに基づいて生成し、推論を含めないこと。
-          ・なるべくたくさんの詳細情報を含め、可能な限り詳しい内容で記載すること。
-          ・「メモ：」の後に記載された内容は確認済みの情報であり、最も信ぴょう性が高い。
-          ・「～の発言があった」といった発言ベースでの記載ではなく、会議内容を客観的にまとめること。
-          #参考
-          ・システム利用ユーザーは東ソー(Tosoh)の従業員である。文字起こしでは「闘争」「toso」などとなっていることがあるので、修正すること。
-          #文字起こし：${transcript}`;
+        // 基本プロンプトの文面は CONFIG.REPORT_PROMPT で管理
+        return CONFIG.REPORT_PROMPT + transcript;
       }
 
       /* =========================
@@ -3389,17 +3418,9 @@
       function buildIncrementalCleanupPrompt({ fullTranscript, newSegment }) {
         const targetInfo = getLangInfo(el.aiLangSelect?.value || "ja");
         const targetLangEn = targetInfo.en;
+        // 基本プロンプトの文面は CONFIG.SUMMARY_PROMPT で管理
         return [
-          "You are a transcription cleaner for meeting notes.",
-          "You receive the full transcript so far and a newly added segment.",
-          "Use the FULL_TRANSCRIPT only as context.",
-          `Only clean up and rewrite the NEW_SEGMENT in ${targetLangEn}.`,
-          "Preserve the original meaning, decisions, and important details.",
-          "Fix obvious recognition errors and unclear parts based on context.",
-          "Add appropriate punctuation and line breaks.",
-          `Always output in ${targetLangEn}, regardless of the source language.`,
-          "Do not output acknowledgements such as '承知しました' or any meta commentary.",
-          "Output only the cleaned NEW_SEGMENT.",
+          CONFIG.SUMMARY_PROMPT.replaceAll("{LANG}", targetLangEn),
           "",
           "FULL_TRANSCRIPT:",
           fullTranscript,
@@ -3665,17 +3686,8 @@
        * @returns {string}
        */
       function buildInfographicPrompt(report) {
-        return [
-          "以下の内容を、1枚絵の日本語インフォグラフィックにしてください。",
-          "要件：",
-          "・すべてのテキストラベル・見出し・注釈は自然で正確な日本語にすること。",
-          "・要点を図解・アイコン・矢印・簡単なグラフなどで分かりやすく整理する。",
-          "・タイトルを上部に大きく配置し、清潔でビジネス向けの配色にする。",
-          "・文字化けや意味不明な文字を入れず、読みやすいレイアウトにする。",
-          "",
-          "内容：",
-          report,
-        ].join("\n");
+        // 基本プロンプトの文面は CONFIG.INFOGRAPHIC_PROMPT で管理
+        return [CONFIG.INFOGRAPHIC_PROMPT, report].join("\n");
       }
 
       /**
